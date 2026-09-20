@@ -259,8 +259,13 @@ public final class MainActivity extends Activity {
         previousButton = button("PREVIOUS");
         nextButton = button("NEXT");
         previousButton.setOnClickListener(v -> showPlaybackIndex(playbackIndex - 1));
-        nextButton.setOnClickListener(v -> showPlaybackIndex(
-                playbackIndex == playbackHandles.length - 1 ? 0 : playbackIndex + 1));
+        nextButton.setOnClickListener(v -> {
+            if (playbackIndex == playbackHandles.length - 1) {
+                refreshPlaybackAndShowFirst();
+            } else {
+                showPlaybackIndex(playbackIndex + 1);
+            }
+        });
 
         LinearLayout.LayoutParams navButtonLp = new LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
@@ -459,10 +464,32 @@ public final class MainActivity extends Activity {
         playbackButton.setEnabled(false);
         previousButton.setEnabled(false);
         nextButton.setEnabled(false);
-        io.execute(() -> loadPlaybackImage(index));
+        io.execute(() -> loadPlaybackImage(index, true));
+    }
+
+    private void refreshPlaybackAndShowFirst() {
+        if (running) return;
+        playbackButton.setEnabled(false);
+        previousButton.setEnabled(false);
+        nextButton.setEnabled(false);
+
+        io.execute(() -> {
+            try {
+                int[] handles = camera.getImageHandles();
+                if (handles.length == 0) throw new Exception("No playable images found");
+                playbackHandles = handles;
+                loadPlaybackImage(0, true);
+            } catch (Exception e) {
+                showPlaybackError(e);
+            }
+        });
     }
 
     private void loadPlaybackImage(int index) {
+        loadPlaybackImage(index, true);
+    }
+
+    private void loadPlaybackImage(int index, boolean retryOnStaleHandle) {
         try {
             int handle = playbackHandles[index];
             byte[] jpeg = camera.getThumbnail(handle);
@@ -483,14 +510,38 @@ public final class MainActivity extends Activity {
                 playbackButton.setEnabled(true);
             });
         } catch (Exception e) {
-            main.post(() -> {
-                playbackStatus.setVisibility(View.VISIBLE);
-                playbackStatus.setText("Playback error: " + e.getMessage());
-                playbackButton.setEnabled(true);
-                previousButton.setEnabled(playbackIndex > 0);
-                nextButton.setEnabled(playbackHandles.length > 0 && playbackIndex >= 0);
-            });
+            String message = e.getMessage();
+            boolean staleHandle = retryOnStaleHandle
+                    && message != null
+                    && message.toLowerCase(Locale.US).contains("0x2009");
+
+            if (staleHandle) {
+                try {
+                    int[] handles = camera.getImageHandles();
+                    if (handles.length == 0) throw new Exception("No playable images found");
+                    playbackHandles = handles;
+                    int retryIndex = Math.min(index, handles.length - 1);
+                    loadPlaybackImage(retryIndex, false);
+                    return;
+                } catch (Exception retryError) {
+                    showPlaybackError(retryError);
+                    return;
+                }
+            }
+
+            showPlaybackError(e);
         }
+    }
+
+    private void showPlaybackError(Exception e) {
+        String message = e.getMessage();
+        main.post(() -> {
+            playbackStatus.setVisibility(View.VISIBLE);
+            playbackStatus.setText("Playback error: " + message);
+            playbackButton.setEnabled(true);
+            previousButton.setEnabled(playbackIndex > 0);
+            nextButton.setEnabled(playbackHandles.length > 0 && playbackIndex >= 0);
+        });
     }
 
     private void startSequence() {
@@ -783,7 +834,7 @@ public final class MainActivity extends Activity {
         if (closePlaybackButton != null) closePlaybackButton.setEnabled(!running);
         if (previousButton != null) previousButton.setEnabled(connected && !running && playbackIndex > 0);
         if (nextButton != null) nextButton.setEnabled(connected && !running
-                && playbackIndex >= 0 && playbackIndex < playbackHandles.length - 1);
+                && playbackHandles.length > 0 && playbackIndex >= 0);
     }
 
     private void setStatus(String value) {
