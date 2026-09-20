@@ -52,6 +52,9 @@ public final class MainActivity extends Activity {
     private volatile boolean cancelRequested = false;
     private volatile boolean statusCheckInFlight = false;
     private volatile boolean cameraSetupReady = false;
+    private volatile boolean manualModeReady = false;
+    private volatile boolean bulbReady = false;
+    private volatile boolean focusReady = false;
     private boolean destroyed = false;
     private int completed = 0;
 
@@ -286,7 +289,7 @@ public final class MainActivity extends Activity {
         focusCheck = checklistItem("Autofocus: MF");
         checklist.addView(focusCheck, topMargin(8));
 
-        batteryCheck = checklistItem("Battery: --%");
+        batteryCheck = checklistItem("Camera Battery: --%");
         checklist.addView(batteryCheck, topMargin(8));
 
         setChecklistUnknown();
@@ -369,34 +372,35 @@ public final class MainActivity extends Activity {
     }
 
     private void applyChecklist(NikonBulbRemote.CameraSetup setup) {
-        setCheck(cameraModeCheck, "Camera Mode: Manual", setup.manualMode);
-        setCheck(shutterCheck, "Shutter Speed: Bulb", setup.bulb);
-        setCheck(focusCheck, "Autofocus: MF", setup.manualFocus);
-        batteryCheck.setText("Battery: " + setup.batteryLevel + "%");
+        manualModeReady = setup.manualMode;
+        bulbReady = setup.bulb;
+        focusReady = setup.manualFocus;
+
+        setCheck(cameraModeCheck, "Camera Mode: Manual", manualModeReady);
+        setCheck(shutterCheck, "Shutter Speed: Bulb", bulbReady);
+        setCheck(focusCheck, "Autofocus: MF", focusReady);
+        batteryCheck.setText("Camera Battery: " + setup.batteryLevel + "%");
         batteryCheck.setTextColor(RED);
 
-        cameraSetupReady = setup.manualMode && setup.bulb && setup.manualFocus;
-        if (!running) {
-            countdown.setText(cameraSetupReady ? "Ready" : "Not Ready");
-            countdown.setTextColor(cameraSetupReady ? GREY : RED);
-        }
+        cameraSetupReady = manualModeReady && bulbReady && focusReady;
+        updateReadinessStatus();
         updateButtons();
     }
 
     private void setChecklistUnknown() {
         cameraSetupReady = false;
+        manualModeReady = false;
+        bulbReady = false;
+        focusReady = false;
         if (cameraModeCheck == null) return;
         setCheck(cameraModeCheck, "Camera Mode: Manual", false);
         setCheck(shutterCheck, "Shutter Speed: Bulb", false);
         setCheck(focusCheck, "Autofocus: MF", false);
         if (batteryCheck != null) {
-            batteryCheck.setText("Battery: --%");
+            batteryCheck.setText("Camera Battery: --%");
             batteryCheck.setTextColor(RED);
         }
-        if (!running && countdown != null) {
-            countdown.setText("Not Ready");
-            countdown.setTextColor(RED);
-        }
+        updateReadinessStatus();
         updateButtons();
     }
 
@@ -493,10 +497,9 @@ public final class MainActivity extends Activity {
             Toast.makeText(this, "Connect the camera first", Toast.LENGTH_SHORT).show();
             return;
         }
-        if (!cameraSetupReady) {
-            countdown.setText("Not Ready");
-            countdown.setTextColor(RED);
-            Toast.makeText(this, "Camera check must be all green", Toast.LENGTH_SHORT).show();
+        if (!isReadyToStart()) {
+            updateReadinessStatus();
+            Toast.makeText(this, countdown.getText(), Toast.LENGTH_SHORT).show();
             return;
         }
 
@@ -655,6 +658,8 @@ public final class MainActivity extends Activity {
             totalTimeView.setText("Total time: --:--:--");
             timeLeftView.setText("Time left: --:--:--");
         }
+        updateReadinessStatus();
+        updateButtons();
     }
 
     private long plannedTotalMs(double exposureSeconds, double pauseSeconds, int shots) {
@@ -678,9 +683,90 @@ public final class MainActivity extends Activity {
         setStatus("STOP requested");
     }
 
+    private boolean hasValidInputs() {
+        try {
+            String exposureText = exposureField.getText().toString().trim();
+            String countText = countField.getText().toString().trim();
+            String pauseText = pauseField.getText().toString().trim();
+            if (exposureText.isEmpty() || countText.isEmpty() || pauseText.isEmpty()) return false;
+
+            double exposure = Double.parseDouble(exposureText);
+            int shots = Integer.parseInt(countText);
+            double pause = Double.parseDouble(pauseText);
+            return exposure > 0.0 && shots >= 1 && pause >= 0.0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private boolean isReadyToStart() {
+        return camera != null && camera.isConnected() && cameraSetupReady && hasValidInputs();
+    }
+
+    private void updateReadinessStatus() {
+        if (running || countdown == null || exposureField == null || countField == null || pauseField == null) return;
+
+        String reason = null;
+        if (camera == null || !camera.isConnected()) {
+            reason = "Connect camera";
+        } else if (!manualModeReady) {
+            reason = "Camera check: set Manual mode";
+        } else if (!bulbReady) {
+            reason = "Camera check: set Bulb";
+        } else if (!focusReady) {
+            reason = "Camera check: set MF";
+        } else {
+            String exposureText = exposureField.getText().toString().trim();
+            String countText = countField.getText().toString().trim();
+            String pauseText = pauseField.getText().toString().trim();
+
+            if (exposureText.isEmpty()) {
+                reason = "Set exposure time";
+            } else {
+                try {
+                    if (Double.parseDouble(exposureText) <= 0.0) reason = "Exposure time must be above 0";
+                } catch (Exception e) {
+                    reason = "Check exposure time";
+                }
+            }
+
+            if (reason == null) {
+                if (countText.isEmpty()) {
+                    reason = "Set number of exposures";
+                } else {
+                    try {
+                        if (Integer.parseInt(countText) < 1) reason = "Number of exposures must be at least 1";
+                    } catch (Exception e) {
+                        reason = "Check number of exposures";
+                    }
+                }
+            }
+
+            if (reason == null) {
+                if (pauseText.isEmpty()) {
+                    reason = "Set pause time";
+                } else {
+                    try {
+                        if (Double.parseDouble(pauseText) < 0.0) reason = "Pause cannot be negative";
+                    } catch (Exception e) {
+                        reason = "Check pause time";
+                    }
+                }
+            }
+        }
+
+        if (reason == null) {
+            countdown.setText("Ready");
+            countdown.setTextColor(GREY);
+        } else {
+            countdown.setText(reason);
+            countdown.setTextColor(RED);
+        }
+    }
+
     private void updateButtons() {
         boolean connected = camera != null && camera.isConnected();
-        boolean canStart = connected && !running && cameraSetupReady;
+        boolean canStart = !running && isReadyToStart();
         startButton.setEnabled(canStart);
         startButton.setTextColor(canStart ? RED : DISABLED_GREY);
         startButton.setBackgroundTintList(ColorStateList.valueOf(
