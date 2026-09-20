@@ -12,14 +12,24 @@ import java.nio.ByteOrder;
 
 public final class NikonBulbRemote {
     private static final int CONTAINER_COMMAND = 1;
+    private static final int CONTAINER_DATA = 2;
     private static final int CONTAINER_RESPONSE = 3;
 
     private static final int OC_OPEN_SESSION = 0x1002;
     private static final int OC_CLOSE_SESSION = 0x1003;
+    private static final int OC_GET_DEVICE_PROP_VALUE = 0x1015;
 
     private static final int OC_NIKON_DEVICE_READY = 0x90C8;
     private static final int OC_NIKON_INITIATE_CAPTURE_REC_IN_MEDIA = 0x9207;
     private static final int OC_NIKON_TERMINATE_CAPTURE = 0x920C;
+
+    private static final int PROP_FOCUS_MODE = 0x500A;
+    private static final int PROP_EXPOSURE_TIME = 0x500D;
+    private static final int PROP_EXPOSURE_PROGRAM = 0x500E;
+
+    private static final int EXPOSURE_PROGRAM_MANUAL = 0x0001;
+    private static final int FOCUS_MODE_MANUAL = 0x0001;
+    private static final long EXPOSURE_TIME_BULB = 0xFFFFFFFFL;
 
     private static final int RC_OK = 0x2001;
     private static final int RC_DEVICE_BUSY = 0x2019;
@@ -114,6 +124,19 @@ public final class NikonBulbRemote {
         waitUntilReady(30000);
     }
 
+    public CameraSetup readCameraSetup() throws Exception {
+        ensureConnected();
+
+        int exposureProgram = getUint16Property(PROP_EXPOSURE_PROGRAM);
+        long exposureTime = getUint32Property(PROP_EXPOSURE_TIME);
+        int focusMode = getUint16Property(PROP_FOCUS_MODE);
+
+        return new CameraSetup(
+                exposureProgram == EXPOSURE_PROGRAM_MANUAL,
+                exposureTime == EXPOSURE_TIME_BULB,
+                focusMode == FOCUS_MODE_MANUAL);
+    }
+
     public void startCaptureNoAf() throws Exception {
         ensureConnected();
         if (captureOpen) throw new Exception("Capture is already open");
@@ -203,6 +226,58 @@ public final class NikonBulbRemote {
         captureOpen = false;
     }
 
+    private int getUint16Property(int propertyCode) throws Exception {
+        byte[] data = getPropertyData(propertyCode);
+        if (data.length < 2) throw new Exception(String.format("Property 0x%04X returned no value", propertyCode));
+        return ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN).getShort() & 0xFFFF;
+    }
+
+    private long getUint32Property(int propertyCode) throws Exception {
+        byte[] data = getPropertyData(propertyCode);
+        if (data.length < 4) throw new Exception(String.format("Property 0x%04X returned no value", propertyCode));
+        return ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN).getInt() & 0xFFFFFFFFL;
+    }
+
+    private byte[] getPropertyData(int propertyCode) throws Exception {
+        int tid = transactionId++;
+        sendCommand(OC_GET_DEVICE_PROP_VALUE, tid, new int[]{propertyCode}, 5000);
+
+        byte[] value = null;
+        byte[] input = new byte[1024];
+        long deadline = System.currentTimeMillis() + 8000;
+
+        while (System.currentTimeMillis() < deadline) {
+            int remaining = (int)Math.max(1, deadline - System.currentTimeMillis());
+            int n = connection.bulkTransfer(bulkIn, input, input.length, Math.min(3000, remaining));
+            if (n < 12) continue;
+
+            int offset = 0;
+            while (offset + 12 <= n) {
+                ByteBuffer header = ByteBuffer.wrap(input, offset, n - offset).order(ByteOrder.LITTLE_ENDIAN);
+                int length = header.getInt();
+                int type = header.getShort() & 0xFFFF;
+                int code = header.getShort() & 0xFFFF;
+                int responseTid = header.getInt();
+
+                if (length < 12 || offset + length > n) break;
+
+                if (responseTid == tid && type == CONTAINER_DATA && code == OC_GET_DEVICE_PROP_VALUE) {
+                    int payloadLength = length - 12;
+                    value = new byte[payloadLength];
+                    System.arraycopy(input, offset + 12, value, 0, payloadLength);
+                } else if (responseTid == tid && type == CONTAINER_RESPONSE) {
+                    if (code != RC_OK) throw ptpException("Read camera property", code);
+                    if (value == null) throw new Exception("Camera property returned no data");
+                    return value;
+                }
+
+                offset += length;
+            }
+        }
+
+        throw new Exception(String.format("Property 0x%04X timed out", propertyCode));
+    }
+
     private void waitUntilReady(long timeoutMs) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMs;
         Response last = null;
@@ -236,7 +311,37 @@ public final class NikonBulbRemote {
 
     private Response transact(int operationCode, int[] params, int timeoutMs) throws Exception {
         int tid = transactionId++;
+        sendCommand(operationCode, tid, params, timeoutMs);
 
+        byte[] input = new byte[512];
+        long deadline = System.currentTimeMillis() + timeoutMs;
+
+        while (System.currentTimeMillis() < deadline) {
+            int remaining = (int)Math.max(1, deadline - System.currentTimeMillis());
+            int n = connection.bulkTransfer(bulkIn, input, input.length, Math.min(3000, remaining));
+            if (n < 12) continue;
+
+            int offset = 0;
+            while (offset + 12 <= n) {
+                ByteBuffer response = ByteBuffer.wrap(input, offset, n - offset).order(ByteOrder.LITTLE_ENDIAN);
+                int length = response.getInt();
+                int type = response.getShort() & 0xFFFF;
+                int code = response.getShort() & 0xFFFF;
+                int responseTid = response.getInt();
+
+                if (length < 12 || offset + length > n) break;
+
+                if (type == CONTAINER_RESPONSE && responseTid == tid) {
+                    return new Response(code);
+                }
+                offset += length;
+            }
+        }
+
+        throw new Exception(String.format("PTP 0x%04X timed out", operationCode));
+    }
+
+    private void sendCommand(int operationCode, int tid, int[] params, int timeoutMs) throws Exception {
         int commandLength = 12 + params.length * 4;
         ByteBuffer command = ByteBuffer.allocate(commandLength).order(ByteOrder.LITTLE_ENDIAN);
         command.putInt(commandLength);
@@ -248,27 +353,6 @@ public final class NikonBulbRemote {
         byte[] out = command.array();
         int written = connection.bulkTransfer(bulkOut, out, out.length, timeoutMs);
         if (written != out.length) throw new Exception("USB command write failed");
-
-        byte[] input = new byte[512];
-        long deadline = System.currentTimeMillis() + timeoutMs;
-
-        while (System.currentTimeMillis() < deadline) {
-            int remaining = (int)Math.max(1, deadline - System.currentTimeMillis());
-            int n = connection.bulkTransfer(bulkIn, input, input.length, Math.min(3000, remaining));
-            if (n < 12) continue;
-
-            ByteBuffer response = ByteBuffer.wrap(input, 0, n).order(ByteOrder.LITTLE_ENDIAN);
-            response.getInt();
-            int type = response.getShort() & 0xFFFF;
-            int code = response.getShort() & 0xFFFF;
-            int responseTid = response.getInt();
-
-            if (type == CONTAINER_RESPONSE && responseTid == tid) {
-                return new Response(code);
-            }
-        }
-
-        throw new Exception(String.format("PTP 0x%04X timed out", operationCode));
     }
 
     private void ensureConnected() throws Exception {
@@ -283,6 +367,18 @@ public final class NikonBulbRemote {
         else if (code == 0x2005) hint = " — operation not supported";
         else if (code == 0x200A) hint = " — invalid parameter";
         return new Exception(String.format("%s: PTP 0x%04X%s", operation, code, hint));
+    }
+
+    public static final class CameraSetup {
+        public final boolean manualMode;
+        public final boolean bulb;
+        public final boolean manualFocus;
+
+        CameraSetup(boolean manualMode, boolean bulb, boolean manualFocus) {
+            this.manualMode = manualMode;
+            this.bulb = bulb;
+            this.manualFocus = manualFocus;
+        }
     }
 
     private static final class Response {
