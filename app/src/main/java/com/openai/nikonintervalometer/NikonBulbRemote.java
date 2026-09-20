@@ -9,6 +9,7 @@ import android.hardware.usb.UsbManager;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.Arrays;
 
 public final class NikonBulbRemote {
     private static final int CONTAINER_COMMAND = 1;
@@ -18,6 +19,8 @@ public final class NikonBulbRemote {
     private static final int OC_OPEN_SESSION = 0x1002;
     private static final int OC_CLOSE_SESSION = 0x1003;
     private static final int OC_GET_DEVICE_PROP_VALUE = 0x1015;
+    private static final int OC_GET_OBJECT_HANDLES = 0x1007;
+    private static final int OC_GET_THUMB = 0x100A;
 
     private static final int OC_NIKON_DEVICE_READY = 0x90C8;
     private static final int OC_NIKON_INITIATE_CAPTURE_REC_IN_MEDIA = 0x9207;
@@ -135,6 +138,30 @@ public final class NikonBulbRemote {
                 exposureProgram == EXPOSURE_PROGRAM_MANUAL,
                 exposureTime == EXPOSURE_TIME_BULB,
                 focusMode == FOCUS_MODE_MANUAL);
+    }
+
+    public int[] getImageHandles() throws Exception {
+        ensureConnected();
+        waitUntilReady(30000);
+
+        byte[] data = dataOperation(
+                OC_GET_OBJECT_HANDLES,
+                new int[]{0xFFFFFFFF, 0, 0},
+                30000);
+
+        if (data.length < 4) return new int[0];
+        ByteBuffer b = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
+        long countLong = b.getInt() & 0xFFFFFFFFL;
+        int count = (int)Math.min(countLong, (data.length - 4) / 4);
+        int[] handles = new int[count];
+        for (int i = 0; i < count; i++) handles[i] = b.getInt();
+        return handles;
+    }
+
+    public byte[] getThumbnail(int objectHandle) throws Exception {
+        ensureConnected();
+        waitUntilReady(30000);
+        return dataOperation(OC_GET_THUMB, new int[]{objectHandle}, 30000);
     }
 
     public void startCaptureNoAf() throws Exception {
@@ -278,6 +305,75 @@ public final class NikonBulbRemote {
         throw new Exception(String.format("Property 0x%04X timed out", propertyCode));
     }
 
+    private byte[] dataOperation(int operationCode, int[] params, int timeoutMs) throws Exception {
+        int tid = transactionId++;
+        sendCommand(operationCode, tid, params, timeoutMs);
+
+        byte[] payload = null;
+        long deadline = System.currentTimeMillis() + timeoutMs;
+
+        while (System.currentTimeMillis() < deadline) {
+            UsbContainer container = readContainer(Math.max(1, deadline - System.currentTimeMillis()));
+            if (container.transactionId != tid) continue;
+
+            if (container.type == CONTAINER_DATA && container.code == operationCode) {
+                payload = container.payload;
+            } else if (container.type == CONTAINER_RESPONSE) {
+                if (container.code != RC_OK) {
+                    throw ptpException("PTP data operation", container.code);
+                }
+                if (payload == null) return new byte[0];
+                return payload;
+            }
+        }
+
+        throw new Exception(String.format("PTP 0x%04X timed out", operationCode));
+    }
+
+    private UsbContainer readContainer(long timeoutMs) throws Exception {
+        byte[] first = new byte[16384];
+        int timeout = (int)Math.min(Integer.MAX_VALUE, Math.max(1, timeoutMs));
+
+        int n;
+        do {
+            n = connection.bulkTransfer(bulkIn, first, first.length, Math.min(3000, timeout));
+            if (n < 0) throw new Exception("USB read failed");
+        } while (n < 12);
+
+        ByteBuffer header = ByteBuffer.wrap(first, 0, n).order(ByteOrder.LITTLE_ENDIAN);
+        int length = header.getInt();
+        int type = header.getShort() & 0xFFFF;
+        int code = header.getShort() & 0xFFFF;
+        int tid = header.getInt();
+
+        if (length < 12 || length > 32 * 1024 * 1024) {
+            throw new Exception("Invalid PTP container length");
+        }
+
+        byte[] container = new byte[length];
+        int copied = Math.min(n, length);
+        System.arraycopy(first, 0, container, 0, copied);
+
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (copied < length && System.currentTimeMillis() < deadline) {
+            int want = Math.min(16384, length - copied);
+            byte[] chunk = new byte[want];
+            int remaining = (int)Math.max(1, deadline - System.currentTimeMillis());
+            int got = connection.bulkTransfer(bulkIn, chunk, want, Math.min(3000, remaining));
+            if (got <= 0) continue;
+            System.arraycopy(chunk, 0, container, copied, got);
+            copied += got;
+        }
+
+        if (copied < length) throw new Exception("PTP data transfer timed out");
+
+        return new UsbContainer(
+                type,
+                code,
+                tid,
+                length > 12 ? Arrays.copyOfRange(container, 12, length) : new byte[0]);
+    }
+
     private void waitUntilReady(long timeoutMs) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMs;
         Response last = null;
@@ -378,6 +474,20 @@ public final class NikonBulbRemote {
             this.manualMode = manualMode;
             this.bulb = bulb;
             this.manualFocus = manualFocus;
+        }
+    }
+
+    private static final class UsbContainer {
+        final int type;
+        final int code;
+        final int transactionId;
+        final byte[] payload;
+
+        UsbContainer(int type, int code, int transactionId, byte[] payload) {
+            this.type = type;
+            this.code = code;
+            this.transactionId = transactionId;
+            this.payload = payload;
         }
     }
 
