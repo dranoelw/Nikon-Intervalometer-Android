@@ -75,6 +75,11 @@ public final class MainActivity extends Activity {
                 boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
                 if (granted && device != null) connectTo(device);
                 else setStatus("USB permission denied");
+            } else if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(intent.getAction())) {
+                UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                if (device != null && !camera.isConnected()) {
+                    connectOrRequestPermission(device);
+                }
             } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(intent.getAction())) {
                 cancelRequested = true;
                 running = false;
@@ -98,6 +103,7 @@ public final class MainActivity extends Activity {
 
         IntentFilter filter = new IntentFilter();
         filter.addAction(ACTION_USB_PERMISSION);
+        filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
         filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
         if (android.os.Build.VERSION.SDK_INT >= 33) {
             registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
@@ -106,7 +112,14 @@ public final class MainActivity extends Activity {
         }
 
         main.post(cameraStatusPoller);
-        scanAndConnect();
+
+        UsbDevice attached = null;
+        Intent launchIntent = getIntent();
+        if (launchIntent != null && UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(launchIntent.getAction())) {
+            attached = launchIntent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+        }
+        if (attached != null) connectOrRequestPermission(attached);
+        else scanAndConnect();
     }
 
     private void buildUi() {
@@ -202,6 +215,12 @@ public final class MainActivity extends Activity {
             return;
         }
 
+        connectOrRequestPermission(device);
+    }
+
+    private void connectOrRequestPermission(UsbDevice device) {
+        if (device == null || camera.isConnected()) return;
+
         if (usbManager.hasPermission(device)) {
             connectTo(device);
         } else {
@@ -213,6 +232,15 @@ public final class MainActivity extends Activity {
                     new Intent(ACTION_USB_PERMISSION).setPackage(getPackageName()),
                     flags);
             usbManager.requestPermission(device, pi);
+        }
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(intent.getAction())) {
+            UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+            connectOrRequestPermission(device);
         }
     }
 
