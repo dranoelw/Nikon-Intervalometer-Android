@@ -18,7 +18,6 @@ public final class NikonBulbRemote {
     private static final int OC_CLOSE_SESSION = 0x1003;
 
     // Nikon vendor operations used by libgphoto2 for Nikon DSLR capture.
-    private static final int OC_NIKON_DEVICE_READY = 0x90C8;
     private static final int OC_NIKON_INITIATE_CAPTURE_REC_IN_MEDIA = 0x9207;
     private static final int OC_NIKON_TERMINATE_CAPTURE = 0x920C;
 
@@ -115,14 +114,11 @@ public final class NikonBulbRemote {
         }
 
         sessionOpen = true;
-        waitUntilReady(15000);
     }
 
     public void startCaptureNoAf() throws Exception {
         ensureConnected();
         if (captureOpen) throw new Exception("Capture is already open");
-
-        waitUntilReady(15000);
 
         // Deliberately no fallback to generic InitiateCapture.
         // We want Nikon's no-AF path only.
@@ -155,8 +151,6 @@ public final class NikonBulbRemote {
             throw ptpException("STOP rejected", response.code);
         }
 
-        // The camera can remain busy briefly while finishing/writing the image.
-        waitUntilReady(30000);
     }
 
     public boolean isCaptureOpen() {
@@ -198,32 +192,6 @@ public final class NikonBulbRemote {
         transactionId = 1;
         sessionOpen = false;
         captureOpen = false;
-    }
-
-    private void waitUntilReady(long timeoutMs) throws Exception {
-        long deadline = System.currentTimeMillis() + timeoutMs;
-
-        while (System.currentTimeMillis() < deadline) {
-            Response response = transact(OC_NIKON_DEVICE_READY, new int[]{}, 5000);
-
-            if (response.code == RC_OK) return;
-
-            if (response.code != RC_DEVICE_BUSY) {
-                // Some D3xxx bodies hide/partially implement DeviceReady.
-                // If unsupported, do not let that prevent the remote START/STOP commands.
-                if (response.code == 0x2005 || response.code == 0x2006) return;
-                throw ptpException("Camera readiness check", response.code);
-            }
-
-            try {
-                Thread.sleep(250);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new Exception("Interrupted while waiting for camera");
-            }
-        }
-
-        throw new Exception("Camera stayed busy too long");
     }
 
     private Response transact(int operationCode, int[] params, int timeoutMs) throws Exception {
