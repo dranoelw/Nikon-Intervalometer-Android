@@ -16,7 +16,6 @@ import android.text.InputType;
 import android.view.Gravity;
 import android.view.WindowManager;
 import android.widget.Button;
-import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -31,19 +30,20 @@ public final class MainActivity extends Activity {
     private static final String ACTION_USB_PERMISSION = "com.openai.nikonintervalometer.USB_PERMISSION";
 
     private UsbManager usbManager;
-    private PtpCamera camera;
+    private NikonBulbRemote camera;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
+
     private volatile boolean running = false;
+    private volatile boolean cancelRequested = false;
     private int completed = 0;
 
     private TextView status;
-    private TextView progress;
-    private EditText intervalField;
+    private TextView countdown;
+    private EditText exposureField;
+    private EditText pauseField;
     private EditText countField;
     private EditText delayField;
-    private EditText bulbField;
-    private CheckBox bulbCheck;
     private Button connectButton;
     private Button startButton;
     private Button stopButton;
@@ -56,6 +56,7 @@ public final class MainActivity extends Activity {
                 if (granted && device != null) connectTo(device);
                 else setStatus("USB permission denied");
             } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(intent.getAction())) {
+                cancelRequested = true;
                 running = false;
                 camera.disconnect();
                 setStatus("Camera disconnected");
@@ -68,7 +69,7 @@ public final class MainActivity extends Activity {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
-        camera = new PtpCamera(usbManager);
+        camera = new NikonBulbRemote(usbManager);
         buildUi();
 
         IntentFilter filter = new IntentFilter();
@@ -79,6 +80,7 @@ public final class MainActivity extends Activity {
         } else {
             registerReceiver(usbReceiver, filter);
         }
+
         scanAndConnect();
     }
 
@@ -90,117 +92,103 @@ public final class MainActivity extends Activity {
         root.setGravity(Gravity.CENTER_HORIZONTAL);
         scroll.addView(root);
 
-        TextView title = new TextView(this);
-        title.setText("Nikon Intervalometer");
-        title.setTextSize(28);
-        title.setTextColor(Color.BLACK);
+        TextView title = text("D3400 Bulb Remote", 28);
         title.setGravity(Gravity.CENTER);
         root.addView(title, fullWrap());
 
-        TextView subtitle = new TextView(this);
-        subtitle.setText("USB / PTP • Nikon D3400");
-        subtitle.setTextSize(14);
+        TextView subtitle = text("USB remote: START → wait → STOP", 14);
         subtitle.setTextColor(Color.DKGRAY);
         subtitle.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams subLp = fullWrap(); subLp.setMargins(0, dp(4), 0, dp(24));
-        root.addView(subtitle, subLp);
+        LinearLayout.LayoutParams sub = fullWrap();
+        sub.setMargins(0, dp(4), 0, dp(22));
+        root.addView(subtitle, sub);
 
-        status = label("Looking for USB camera…", 16);
+        status = text("Looking for camera…", 16);
         status.setGravity(Gravity.CENTER);
         root.addView(status, fullWrap());
 
         connectButton = button("CONNECT CAMERA");
         connectButton.setOnClickListener(v -> scanAndConnect());
-        LinearLayout.LayoutParams buttonLp = fullWrap(); buttonLp.setMargins(0, dp(12), 0, dp(20));
-        root.addView(connectButton, buttonLp);
+        LinearLayout.LayoutParams conn = fullWrap();
+        conn.setMargins(0, dp(12), 0, dp(20));
+        root.addView(connectButton, conn);
 
-        bulbCheck = new CheckBox(this);
-        bulbCheck.setText("Bulb mode");
-        bulbCheck.setTextSize(18);
-        bulbCheck.setOnCheckedChangeListener((buttonView, checked) -> {
-            bulbField.setEnabled(checked && !running);
-            updateBulbHint();
-        });
-        root.addView(bulbCheck, fullWrap());
+        root.addView(label("Exposure time (seconds)"), fullWrap());
+        exposureField = numberField("10", true);
+        root.addView(exposureField, fullWrap());
 
-        root.addView(fieldLabel("Bulb exposure time (seconds)"), marginTop(6));
-        bulbField = numberField("30", true);
-        bulbField.setEnabled(false);
-        root.addView(bulbField, fullWrap());
+        root.addView(label("Pause after each exposure (seconds)"), topMargin(14));
+        pauseField = numberField("3", true);
+        root.addView(pauseField, fullWrap());
 
-        TextView bulbHint = label("In Bulb mode the app opens the shutter, times the exposure, then closes it.", 12);
-        bulbHint.setTextColor(Color.DKGRAY);
-        bulbHint.setTag("bulbHint");
-        root.addView(bulbHint, fullWrap());
-
-        root.addView(fieldLabel("Pause after each shot (seconds)"), marginTop(16));
-        intervalField = numberField("5", true);
-        root.addView(intervalField, fullWrap());
-
-        root.addView(fieldLabel("Number of shots"), marginTop(14));
-        countField = numberField("10", false);
+        root.addView(label("Number of exposures"), topMargin(14));
+        countField = numberField("3", false);
         root.addView(countField, fullWrap());
 
-        root.addView(fieldLabel("Start delay (seconds)"), marginTop(14));
+        root.addView(label("Start delay (seconds)"), topMargin(14));
         delayField = numberField("0", true);
         root.addView(delayField, fullWrap());
 
-        progress = label("Ready", 18);
-        progress.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams progLp = fullWrap(); progLp.setMargins(0, dp(24), 0, dp(16));
-        root.addView(progress, progLp);
+        countdown = text("Ready", 20);
+        countdown.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams countLp = fullWrap();
+        countLp.setMargins(0, dp(24), 0, dp(16));
+        root.addView(countdown, countLp);
 
-        startButton = button("START");
+        startButton = button("START SEQUENCE");
         startButton.setTextSize(22);
         startButton.setMinHeight(dp(64));
         startButton.setOnClickListener(v -> startSequence());
         root.addView(startButton, fullWrap());
 
-        stopButton = button("STOP");
+        stopButton = button("STOP NOW");
         stopButton.setTextSize(20);
         stopButton.setMinHeight(dp(58));
-        stopButton.setOnClickListener(v -> stopSequence());
-        LinearLayout.LayoutParams stopLp = fullWrap(); stopLp.setMargins(0, dp(12), 0, 0);
+        stopButton.setOnClickListener(v -> stopNow());
+        LinearLayout.LayoutParams stopLp = fullWrap();
+        stopLp.setMargins(0, dp(12), 0, 0);
         root.addView(stopButton, stopLp);
 
-        TextView note = label("For Bulb: use Manual (M) mode. The app will try to switch shutter speed to Bulb over PTP; if the D3400 rejects that change, set the camera itself to Bulb and retry.", 13);
+        TextView note = text(
+                "Camera setup: M mode, shutter speed Bulb, memory card inserted, and manual focus recommended. " +
+                "This app does not meter or autofocus. It only sends Nikon START/STOP capture commands and times the exposure on the phone.",
+                13);
         note.setTextColor(Color.DKGRAY);
-        LinearLayout.LayoutParams noteLp = fullWrap(); noteLp.setMargins(0, dp(24), 0, 0);
+        LinearLayout.LayoutParams noteLp = fullWrap();
+        noteLp.setMargins(0, dp(24), 0, 0);
         root.addView(note, noteLp);
 
         setContentView(scroll);
         updateButtons();
     }
 
-    private void updateBulbHint() {
-        if (bulbCheck != null && bulbCheck.isChecked() && bulbField != null) {
-            bulbField.setHint("e.g. 120");
-        }
-    }
-
     private void scanAndConnect() {
-        UsbDevice d = camera.findStillImageDevice();
-        if (d == null) {
-            setStatus("No PTP camera detected. Connect D3400 via USB OTG.");
+        UsbDevice device = camera.findCamera();
+        if (device == null) {
+            setStatus("No Nikon/PTP camera detected");
             updateButtons();
             return;
         }
-        if (usbManager.hasPermission(d)) {
-            connectTo(d);
+
+        if (usbManager.hasPermission(device)) {
+            connectTo(device);
         } else {
             setStatus("Camera found — requesting USB permission…");
             int flags = PendingIntent.FLAG_UPDATE_CURRENT;
             if (android.os.Build.VERSION.SDK_INT >= 31) flags |= PendingIntent.FLAG_MUTABLE;
-            PendingIntent pi = PendingIntent.getBroadcast(this, 0, new Intent(ACTION_USB_PERMISSION).setPackage(getPackageName()), flags);
-            usbManager.requestPermission(d, pi);
+            PendingIntent pi = PendingIntent.getBroadcast(
+                    this, 0,
+                    new Intent(ACTION_USB_PERMISSION).setPackage(getPackageName()),
+                    flags);
+            usbManager.requestPermission(device, pi);
         }
     }
 
-    private void connectTo(UsbDevice d) {
+    private void connectTo(UsbDevice device) {
         setStatus("Connecting…");
         io.execute(() -> {
             try {
-                camera.connect(d);
+                camera.connect(device);
                 main.post(() -> {
                     setStatus("Connected: " + camera.getDeviceName());
                     updateButtons();
@@ -219,128 +207,197 @@ public final class MainActivity extends Activity {
             Toast.makeText(this, "Connect the camera first", Toast.LENGTH_SHORT).show();
             return;
         }
-        final double interval;
-        final int total;
-        final double delay;
-        final boolean bulb = bulbCheck.isChecked();
-        final double bulbSeconds;
+
+        final double exposureSeconds;
+        final double pauseSeconds;
+        final double delaySeconds;
+        final int shots;
+
         try {
-            interval = Math.max(0.5, Double.parseDouble(intervalField.getText().toString().trim()));
-            total = Math.max(1, Integer.parseInt(countField.getText().toString().trim()));
-            delay = Math.max(0.0, Double.parseDouble(delayField.getText().toString().trim()));
-            bulbSeconds = bulb ? Math.max(0.5, Double.parseDouble(bulbField.getText().toString().trim())) : 0.0;
+            exposureSeconds = Math.max(0.2, Double.parseDouble(exposureField.getText().toString().trim()));
+            pauseSeconds = Math.max(0.0, Double.parseDouble(pauseField.getText().toString().trim()));
+            delaySeconds = Math.max(0.0, Double.parseDouble(delayField.getText().toString().trim()));
+            shots = Math.max(1, Integer.parseInt(countField.getText().toString().trim()));
         } catch (Exception e) {
-            Toast.makeText(this, "Check interval, shot count, delay and Bulb time", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Check all timing values", Toast.LENGTH_LONG).show();
             return;
         }
 
         running = true;
+        cancelRequested = false;
         completed = 0;
         updateButtons();
-        io.execute(() -> runSequence(interval, total, delay, bulb, bulbSeconds));
+
+        io.execute(() -> runSequence(exposureSeconds, pauseSeconds, delaySeconds, shots));
     }
 
-    private void runSequence(double intervalSeconds, int total, double delaySeconds, boolean bulb, double bulbSeconds) {
+    private void runSequence(double exposureSeconds, double pauseSeconds, double delaySeconds, int shots) {
         try {
-            if (!sleepInterruptibly((long)(delaySeconds * 1000))) return;
+            if (!countdownSleep("Starting in", delaySeconds)) return;
 
-            if (bulb) {
-                boolean setFromApp = camera.setBulbMode();
-                main.post(() -> setStatus(setFromApp
-                        ? "Bulb selected on camera"
-                        : "Bulb property not accepted — camera must already be M + Bulb"));
-            }
+            for (int shot = 1; shot <= shots && !cancelRequested; shot++) {
+                int shotNo = shot;
 
-            long intervalMs = (long)(intervalSeconds * 1000);
-            long bulbMs = (long)(bulbSeconds * 1000);
+                main.post(() -> setStatus("Sending START — no autofocus"));
+                camera.startCaptureNoAf();
 
-            for (int i = 1; i <= total && running; i++) {
-                int shotNo = i;
+                boolean fullExposure = exposureCountdown(shotNo, shots, exposureSeconds);
 
-                if (bulb) {
-                    main.post(() -> progress.setText(String.format(Locale.US,
-                            "Bulb %d / %d — %.1f s", shotNo, total, bulbSeconds)));
-                    camera.startBulb();
-                    boolean fullExposure = sleepInterruptibly(bulbMs);
-                    camera.endBulb();
-                    if (!fullExposure) return;
-                } else {
-                    main.post(() -> progress.setText(String.format(Locale.US, "Shot %d / %d", shotNo, total)));
-                    camera.capture();
-                }
+                // Always send STOP after START, including when the user cancels.
+                main.post(() -> setStatus("Sending STOP"));
+                camera.stopCapture();
 
-                completed = i;
-                if (i < total) {
-                    main.post(() -> progress.setText(String.format(Locale.US,
-                            "Shot %d / %d complete — waiting %.1f s", shotNo, total, intervalSeconds)));
-                    if (!sleepInterruptibly(intervalMs)) return;
+                if (!fullExposure || cancelRequested) break;
+
+                completed = shot;
+                main.post(() -> setStatus("Exposure saved"));
+
+                if (shot < shots && pauseSeconds > 0) {
+                    if (!countdownSleep("Next exposure in", pauseSeconds)) break;
                 }
             }
-            if (running) main.post(() -> progress.setText("Finished — " + completed + " shots"));
+
+            if (!cancelRequested && completed == shots) {
+                main.post(() -> {
+                    countdown.setText("Finished — " + completed + " exposures");
+                    setStatus("Ready");
+                });
+            } else {
+                main.post(() -> {
+                    countdown.setText("Stopped after " + completed + " completed exposures");
+                    setStatus("Ready");
+                });
+            }
         } catch (Exception e) {
-            if (camera.isBulbOpen()) {
-                try { camera.endBulb(); } catch (Exception ignored) {}
-            }
+            // Best-effort STOP in case START succeeded before an error was reported.
+            try { camera.stopCapture(); } catch (Exception ignored) {}
             main.post(() -> {
-                progress.setText("Stopped");
-                setStatus("Capture error: " + e.getMessage());
+                countdown.setText("Stopped");
+                setStatus("Camera error: " + e.getMessage());
             });
         } finally {
             running = false;
+            cancelRequested = false;
             main.post(this::updateButtons);
         }
     }
 
-    private boolean sleepInterruptibly(long ms) {
-        long end = System.currentTimeMillis() + ms;
-        while (running && System.currentTimeMillis() < end) {
-            try { Thread.sleep(Math.min(100, Math.max(1, end - System.currentTimeMillis()))); }
-            catch (InterruptedException ignored) { Thread.currentThread().interrupt(); return false; }
+    private boolean exposureCountdown(int shot, int total, double seconds) {
+        long totalMs = (long)(seconds * 1000.0);
+        long end = System.currentTimeMillis() + totalMs;
+
+        while (!cancelRequested) {
+            long remaining = end - System.currentTimeMillis();
+            if (remaining <= 0) return true;
+
+            double remainingSec = remaining / 1000.0;
+            main.post(() -> countdown.setText(String.format(
+                    Locale.US, "Exposure %d / %d — %.1f s", shot, total, remainingSec)));
+
+            try {
+                Thread.sleep(Math.min(100, Math.max(1, remaining)));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
         }
-        return running;
+        return false;
     }
 
-    private void stopSequence() {
-        running = false;
-        progress.setText(camera.isBulbOpen() ? "Closing shutter…" : "Stopped after " + completed + " shots");
-        updateButtons();
+    private boolean countdownSleep(String prefix, double seconds) {
+        long end = System.currentTimeMillis() + (long)(seconds * 1000.0);
+        while (!cancelRequested) {
+            long remaining = end - System.currentTimeMillis();
+            if (remaining <= 0) return true;
+
+            double remainingSec = remaining / 1000.0;
+            main.post(() -> countdown.setText(String.format(Locale.US, "%s %.1f s", prefix, remainingSec)));
+
+            try {
+                Thread.sleep(Math.min(100, Math.max(1, remaining)));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private void stopNow() {
+        if (!running) return;
+        cancelRequested = true;
+        countdown.setText("Stopping exposure…");
+        setStatus("STOP requested");
     }
 
     private void updateButtons() {
         boolean connected = camera != null && camera.isConnected();
-        if (startButton != null) startButton.setEnabled(connected && !running);
-        if (stopButton != null) stopButton.setEnabled(running);
-        if (connectButton != null) connectButton.setEnabled(!running);
-        if (intervalField != null) intervalField.setEnabled(!running);
-        if (countField != null) countField.setEnabled(!running);
-        if (delayField != null) delayField.setEnabled(!running);
-        if (bulbCheck != null) bulbCheck.setEnabled(!running);
-        if (bulbField != null) bulbField.setEnabled(!running && bulbCheck != null && bulbCheck.isChecked());
+        startButton.setEnabled(connected && !running);
+        stopButton.setEnabled(running);
+        connectButton.setEnabled(!running);
+        exposureField.setEnabled(!running);
+        pauseField.setEnabled(!running);
+        countField.setEnabled(!running);
+        delayField.setEnabled(!running);
     }
 
-    private void setStatus(String s) { if (status != null) status.setText(s); }
+    private void setStatus(String value) {
+        if (status != null) status.setText(value);
+    }
 
-    private TextView fieldLabel(String text) {
-        TextView t = label(text, 14); t.setTextColor(Color.DKGRAY); return t;
+    private TextView text(String value, int size) {
+        TextView view = new TextView(this);
+        view.setText(value);
+        view.setTextSize(size);
+        view.setTextColor(Color.BLACK);
+        return view;
     }
-    private TextView label(String text, int sp) {
-        TextView t = new TextView(this); t.setText(text); t.setTextSize(sp); t.setTextColor(Color.BLACK); return t;
+
+    private TextView label(String value) {
+        TextView view = text(value, 14);
+        view.setTextColor(Color.DKGRAY);
+        return view;
     }
+
     private EditText numberField(String value, boolean decimal) {
-        EditText e = new EditText(this); e.setText(value); e.setTextSize(22); e.setSingleLine(true);
-        e.setInputType(InputType.TYPE_CLASS_NUMBER | (decimal ? InputType.TYPE_NUMBER_FLAG_DECIMAL : 0));
-        e.setPadding(dp(12), dp(8), dp(12), dp(8)); return e;
+        EditText field = new EditText(this);
+        field.setText(value);
+        field.setTextSize(22);
+        field.setSingleLine(true);
+        field.setInputType(InputType.TYPE_CLASS_NUMBER |
+                (decimal ? InputType.TYPE_NUMBER_FLAG_DECIMAL : 0));
+        field.setPadding(dp(12), dp(8), dp(12), dp(8));
+        return field;
     }
-    private Button button(String text) { Button b = new Button(this); b.setText(text); b.setAllCaps(false); return b; }
-    private LinearLayout.LayoutParams fullWrap() { return new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT); }
-    private LinearLayout.LayoutParams marginTop(int dp) { LinearLayout.LayoutParams lp = fullWrap(); lp.setMargins(0, dp(dp), 0, 0); return lp; }
-    private int dp(int d) { return (int)(d * getResources().getDisplayMetrics().density + 0.5f); }
+
+    private Button button(String value) {
+        Button button = new Button(this);
+        button.setText(value);
+        button.setAllCaps(false);
+        return button;
+    }
+
+    private LinearLayout.LayoutParams fullWrap() {
+        return new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+    }
+
+    private LinearLayout.LayoutParams topMargin(int marginDp) {
+        LinearLayout.LayoutParams lp = fullWrap();
+        lp.setMargins(0, dp(marginDp), 0, 0);
+        return lp;
+    }
+
+    private int dp(int value) {
+        return (int)(value * getResources().getDisplayMetrics().density + 0.5f);
+    }
 
     @Override protected void onDestroy() {
-        running = false;
-        if (camera.isBulbOpen()) {
-            try { camera.endBulb(); } catch (Exception ignored) {}
-        }
+        cancelRequested = true;
+        try {
+            if (camera.isCaptureOpen()) camera.stopCapture();
+        } catch (Exception ignored) {}
         try { unregisterReceiver(usbReceiver); } catch (Exception ignored) {}
         camera.disconnect();
         io.shutdownNow();
