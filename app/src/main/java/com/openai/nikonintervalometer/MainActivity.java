@@ -133,8 +133,8 @@ public final class MainActivity extends Activity {
         bulbHint.setTag("bulbHint");
         root.addView(bulbHint, fullWrap());
 
-        root.addView(fieldLabel("Interval between shot starts (seconds)"), marginTop(16));
-        intervalField = numberField("35", true);
+        root.addView(fieldLabel("Pause after each shot (seconds)"), marginTop(16));
+        intervalField = numberField("5", true);
         root.addView(intervalField, fullWrap());
 
         root.addView(fieldLabel("Number of shots"), marginTop(14));
@@ -255,7 +255,6 @@ public final class MainActivity extends Activity {
             long bulbMs = (long)(bulbSeconds * 1000);
 
             for (int i = 1; i <= total && running; i++) {
-                long shotStart = System.currentTimeMillis();
                 int shotNo = i;
 
                 if (bulb) {
@@ -272,8 +271,9 @@ public final class MainActivity extends Activity {
 
                 completed = i;
                 if (i < total) {
-                    long remaining = intervalMs - (System.currentTimeMillis() - shotStart);
-                    if (remaining > 0 && !sleepInterruptibly(remaining)) return;
+                    main.post(() -> progress.setText(String.format(Locale.US,
+                            "Shot %d / %d complete — waiting %.1f s", shotNo, total, intervalSeconds)));
+                    if (!sleepInterruptibly(intervalMs)) return;
                 }
             }
             if (running) main.post(() -> progress.setText("Finished — " + completed + " shots"));
