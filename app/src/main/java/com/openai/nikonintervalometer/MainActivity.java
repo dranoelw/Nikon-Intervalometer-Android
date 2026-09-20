@@ -16,7 +16,6 @@ import android.text.InputType;
 import android.view.Gravity;
 import android.view.WindowManager;
 import android.widget.Button;
-import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -44,12 +43,9 @@ public final class MainActivity extends Activity {
     private EditText exposureField;
     private EditText pauseField;
     private EditText countField;
-    private EditText delayField;
-    private CheckBox liveViewCheck;
     private Button connectButton;
     private Button startButton;
     private Button stopButton;
-    private boolean updatingLiveViewToggle = false;
 
     private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
@@ -62,9 +58,6 @@ public final class MainActivity extends Activity {
                 cancelRequested = true;
                 running = false;
                 camera.disconnect();
-                updatingLiveViewToggle = true;
-                liveViewCheck.setChecked(false);
-                updatingLiveViewToggle = false;
                 setStatus("Camera disconnected");
                 updateButtons();
             }
@@ -102,7 +95,7 @@ public final class MainActivity extends Activity {
         title.setGravity(Gravity.CENTER);
         root.addView(title, fullWrap());
 
-        TextView subtitle = text("USB remote: START → wait → STOP", 14);
+        TextView subtitle = text("USB remote: READY → START → wait → STOP", 14);
         subtitle.setTextColor(Color.DKGRAY);
         subtitle.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams sub = fullWrap();
@@ -131,21 +124,6 @@ public final class MainActivity extends Activity {
         countField = numberField("3", false);
         root.addView(countField, fullWrap());
 
-        root.addView(label("Start delay (seconds)"), topMargin(14));
-        delayField = numberField("0", true);
-        root.addView(delayField, fullWrap());
-
-        liveViewCheck = new CheckBox(this);
-        liveViewCheck.setText("Live View / mirror up");
-        liveViewCheck.setTextSize(18);
-        liveViewCheck.setEnabled(false);
-        liveViewCheck.setOnCheckedChangeListener((buttonView, checked) -> {
-            if (!updatingLiveViewToggle) setLiveViewPersistent(checked);
-        });
-        LinearLayout.LayoutParams lvLp = fullWrap();
-        lvLp.setMargins(0, dp(16), 0, 0);
-        root.addView(liveViewCheck, lvLp);
-
         countdown = text("Ready", 20);
         countdown.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams countLp = fullWrap();
@@ -168,7 +146,7 @@ public final class MainActivity extends Activity {
 
         TextView note = text(
                 "Camera setup: M mode, shutter speed Bulb, memory card inserted, and manual focus recommended. " +
-                "Live View is independent of the exposure sequence: switch it ON to raise/keep the mirror up, and it stays ON until you switch it OFF, disconnect, or close the app.",
+                "The app waits for the camera to be ready, sends START without autofocus, times the exposure on the phone, sends STOP, then waits for the camera to be ready again.",
                 13);
         note.setTextColor(Color.DKGRAY);
         LinearLayout.LayoutParams noteLp = fullWrap();
@@ -207,53 +185,12 @@ public final class MainActivity extends Activity {
             try {
                 camera.connect(device);
                 main.post(() -> {
-                    updatingLiveViewToggle = true;
-                    liveViewCheck.setChecked(camera.isLiveViewActive());
-                    updatingLiveViewToggle = false;
                     setStatus("Connected: " + camera.getDeviceName());
                     updateButtons();
                 });
             } catch (Exception e) {
                 main.post(() -> {
                     setStatus("Connection failed: " + e.getMessage());
-                    updateButtons();
-                });
-            }
-        });
-    }
-
-    private void setLiveViewPersistent(boolean enabled) {
-        if (!camera.isConnected()) {
-            updatingLiveViewToggle = true;
-            liveViewCheck.setChecked(false);
-            updatingLiveViewToggle = false;
-            Toast.makeText(this, "Connect the camera first", Toast.LENGTH_SHORT).show();
-            return;
-        }
-
-        liveViewCheck.setEnabled(false);
-        setStatus(enabled ? "Starting Live View — raising mirror…" : "Ending Live View — lowering mirror…");
-
-        io.execute(() -> {
-            try {
-                if (enabled) camera.startLiveView();
-                else camera.endLiveView();
-
-                main.post(() -> {
-                    updatingLiveViewToggle = true;
-                    liveViewCheck.setChecked(camera.isLiveViewActive());
-                    updatingLiveViewToggle = false;
-                    setStatus(camera.isLiveViewActive()
-                            ? "Live View ON — mirror up"
-                            : "Live View OFF — mirror down");
-                    updateButtons();
-                });
-            } catch (Exception e) {
-                main.post(() -> {
-                    updatingLiveViewToggle = true;
-                    liveViewCheck.setChecked(camera.isLiveViewActive());
-                    updatingLiveViewToggle = false;
-                    setStatus("Live View error: " + e.getMessage());
                     updateButtons();
                 });
             }
@@ -268,12 +205,11 @@ public final class MainActivity extends Activity {
 
         final double exposureSeconds;
         final double pauseSeconds;
-        final double delaySeconds;
         final int shots;
+
         try {
             exposureSeconds = Math.max(0.2, Double.parseDouble(exposureField.getText().toString().trim()));
             pauseSeconds = Math.max(0.0, Double.parseDouble(pauseField.getText().toString().trim()));
-            delaySeconds = Math.max(0.0, Double.parseDouble(delayField.getText().toString().trim()));
             shots = Math.max(1, Integer.parseInt(countField.getText().toString().trim()));
         } catch (Exception e) {
             Toast.makeText(this, "Check all timing values", Toast.LENGTH_LONG).show();
@@ -285,29 +221,26 @@ public final class MainActivity extends Activity {
         completed = 0;
         updateButtons();
 
-        io.execute(() -> runSequence(exposureSeconds, pauseSeconds, delaySeconds, shots));
+        io.execute(() -> runSequence(exposureSeconds, pauseSeconds, shots));
     }
 
-    private void runSequence(double exposureSeconds, double pauseSeconds, double delaySeconds, int shots) {
+    private void runSequence(double exposureSeconds, double pauseSeconds, int shots) {
         try {
-            if (!countdownSleep("Starting in", delaySeconds)) return;
-
             for (int shot = 1; shot <= shots && !cancelRequested; shot++) {
                 int shotNo = shot;
 
-                main.post(() -> setStatus("Sending START — no autofocus"));
+                main.post(() -> setStatus("Waiting for camera, then START"));
                 camera.startCaptureNoAf();
 
                 boolean fullExposure = exposureCountdown(shotNo, shots, exposureSeconds);
 
-                // Always send STOP after START, including when the user cancels.
                 main.post(() -> setStatus("Sending STOP"));
                 camera.stopCapture();
 
                 if (!fullExposure || cancelRequested) break;
 
                 completed = shot;
-                main.post(() -> setStatus("Exposure saved"));
+                main.post(() -> setStatus("Exposure saved — camera ready"));
 
                 if (shot < shots && pauseSeconds > 0) {
                     if (!countdownSleep("Next exposure in", pauseSeconds)) break;
@@ -326,7 +259,6 @@ public final class MainActivity extends Activity {
                 });
             }
         } catch (Exception e) {
-            // Best-effort STOP in case START succeeded before an error was reported.
             try { camera.stopCapture(); } catch (Exception ignored) {}
             main.post(() -> {
                 countdown.setText("Stopped");
@@ -340,8 +272,7 @@ public final class MainActivity extends Activity {
     }
 
     private boolean exposureCountdown(int shot, int total, double seconds) {
-        long totalMs = (long)(seconds * 1000.0);
-        long end = System.currentTimeMillis() + totalMs;
+        long end = System.currentTimeMillis() + (long)(seconds * 1000.0);
 
         while (!cancelRequested) {
             long remaining = end - System.currentTimeMillis();
@@ -363,12 +294,14 @@ public final class MainActivity extends Activity {
 
     private boolean countdownSleep(String prefix, double seconds) {
         long end = System.currentTimeMillis() + (long)(seconds * 1000.0);
+
         while (!cancelRequested) {
             long remaining = end - System.currentTimeMillis();
             if (remaining <= 0) return true;
 
             double remainingSec = remaining / 1000.0;
-            main.post(() -> countdown.setText(String.format(Locale.US, "%s %.1f s", prefix, remainingSec)));
+            main.post(() -> countdown.setText(String.format(
+                    Locale.US, "%s %.1f s", prefix, remainingSec)));
 
             try {
                 Thread.sleep(Math.min(100, Math.max(1, remaining)));
@@ -395,8 +328,6 @@ public final class MainActivity extends Activity {
         exposureField.setEnabled(!running);
         pauseField.setEnabled(!running);
         countField.setEnabled(!running);
-        delayField.setEnabled(!running);
-        liveViewCheck.setEnabled(connected && !running);
     }
 
     private void setStatus(String value) {
@@ -455,9 +386,6 @@ public final class MainActivity extends Activity {
         cancelRequested = true;
         try {
             if (camera.isCaptureOpen()) camera.stopCapture();
-        } catch (Exception ignored) {}
-        try {
-            if (camera.isLiveViewActive()) camera.endLiveView();
         } catch (Exception ignored) {}
         try { unregisterReceiver(usbReceiver); } catch (Exception ignored) {}
         camera.disconnect();
