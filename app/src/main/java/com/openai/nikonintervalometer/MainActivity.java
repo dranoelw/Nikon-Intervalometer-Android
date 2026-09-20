@@ -14,6 +14,8 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.WindowManager;
 import android.widget.Button;
@@ -51,6 +53,8 @@ public final class MainActivity extends Activity {
     private TextView cameraModeCheck;
     private TextView shutterCheck;
     private TextView focusCheck;
+    private TextView totalTimeView;
+    private TextView timeLeftView;
     private EditText exposureField;
     private EditText pauseField;
     private EditText countField;
@@ -160,6 +164,30 @@ public final class MainActivity extends Activity {
         root.addView(label("Number of exposures"), topMargin(14));
         countField = numberField("3", false);
         root.addView(countField, fullWrap());
+
+        totalTimeView = text("Total time: 00:00:36", 16);
+        totalTimeView.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams totalLp = fullWrap();
+        totalLp.setMargins(0, dp(20), 0, 0);
+        root.addView(totalTimeView, totalLp);
+
+        timeLeftView = text("Time left: 00:00:36", 18);
+        timeLeftView.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams leftLp = fullWrap();
+        leftLp.setMargins(0, dp(6), 0, 0);
+        root.addView(timeLeftView, leftLp);
+
+        TextWatcher timingWatcher = new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
+                if (!running) updatePlannedTimes();
+            }
+            @Override public void afterTextChanged(Editable s) {}
+        };
+        exposureField.addTextChangedListener(timingWatcher);
+        pauseField.addTextChangedListener(timingWatcher);
+        countField.addTextChangedListener(timingWatcher);
+        updatePlannedTimes();
 
         countdown = text("Ready", 20);
         countdown.setGravity(Gravity.CENTER);
@@ -322,6 +350,10 @@ public final class MainActivity extends Activity {
         completed = 0;
         updateButtons();
 
+        long totalMs = plannedTotalMs(exposureSeconds, pauseSeconds, shots);
+        totalTimeView.setText("Total time: " + formatDuration(totalMs));
+        timeLeftView.setText("Time left: " + formatDuration(totalMs));
+
         io.execute(() -> runSequence(exposureSeconds, pauseSeconds, shots));
     }
 
@@ -334,7 +366,8 @@ public final class MainActivity extends Activity {
                 camera.startCaptureNoAf();
 
                 main.post(() -> setStatus("Capturing"));
-                boolean fullExposure = exposureCountdown(shotNo, shots, exposureSeconds);
+                boolean fullExposure = exposureCountdown(
+                        shotNo, shots, exposureSeconds, pauseSeconds);
 
                 main.post(() -> setStatus("Sending STOP"));
                 camera.stopCapture();
@@ -345,13 +378,14 @@ public final class MainActivity extends Activity {
                 main.post(() -> setStatus("Exposure saved"));
 
                 if (shot < shots && pauseSeconds > 0) {
-                    if (!countdownSleep("Next exposure in", pauseSeconds)) break;
+                    if (!pauseCountdown(shotNo, shots, exposureSeconds, pauseSeconds)) break;
                 }
             }
 
             if (!cancelRequested && completed == shots) {
                 main.post(() -> {
                     countdown.setText("Finished — " + completed + " exposures");
+                    timeLeftView.setText("Time left: 00:00:00");
                     setStatus("Ready");
                 });
             } else {
@@ -376,16 +410,25 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private boolean exposureCountdown(int shot, int total, double seconds) {
-        long end = System.currentTimeMillis() + (long)(seconds * 1000.0);
+    private boolean exposureCountdown(int shot, int total, double exposureSeconds, double pauseSeconds) {
+        long exposureMs = (long)(exposureSeconds * 1000.0);
+        long pauseMs = (long)(pauseSeconds * 1000.0);
+        long end = System.currentTimeMillis() + exposureMs;
 
         while (!cancelRequested) {
             long remaining = end - System.currentTimeMillis();
             if (remaining <= 0) return true;
 
+            long futureMs = (long)(total - shot) * exposureMs
+                    + (long)(total - shot) * pauseMs;
+            long sequenceRemaining = remaining + futureMs;
             double remainingSec = remaining / 1000.0;
-            main.post(() -> countdown.setText(String.format(
-                    Locale.US, "Exposure %d / %d — %.1f s", shot, total, remainingSec)));
+
+            main.post(() -> {
+                countdown.setText(String.format(
+                        Locale.US, "Exposure %d / %d — %.1f s", shot, total, remainingSec));
+                timeLeftView.setText("Time left: " + formatDuration(sequenceRemaining));
+            });
 
             try {
                 Thread.sleep(Math.min(100, Math.max(1, remaining)));
@@ -397,16 +440,25 @@ public final class MainActivity extends Activity {
         return false;
     }
 
-    private boolean countdownSleep(String prefix, double seconds) {
-        long end = System.currentTimeMillis() + (long)(seconds * 1000.0);
+    private boolean pauseCountdown(int shot, int total, double exposureSeconds, double pauseSeconds) {
+        long exposureMs = (long)(exposureSeconds * 1000.0);
+        long pauseMs = (long)(pauseSeconds * 1000.0);
+        long end = System.currentTimeMillis() + pauseMs;
 
         while (!cancelRequested) {
             long remaining = end - System.currentTimeMillis();
             if (remaining <= 0) return true;
 
+            long futureExposureMs = (long)(total - shot) * exposureMs;
+            long futurePauseMs = (long)Math.max(0, total - shot - 1) * pauseMs;
+            long sequenceRemaining = remaining + futureExposureMs + futurePauseMs;
             double remainingSec = remaining / 1000.0;
-            main.post(() -> countdown.setText(String.format(
-                    Locale.US, "%s %.1f s", prefix, remainingSec)));
+
+            main.post(() -> {
+                countdown.setText(String.format(
+                        Locale.US, "Next exposure in %.1f s", remainingSec));
+                timeLeftView.setText("Time left: " + formatDuration(sequenceRemaining));
+            });
 
             try {
                 Thread.sleep(Math.min(100, Math.max(1, remaining)));
@@ -416,6 +468,38 @@ public final class MainActivity extends Activity {
             }
         }
         return false;
+    }
+
+    private void updatePlannedTimes() {
+        try {
+            double exposureSeconds = Math.max(0.2,
+                    Double.parseDouble(exposureField.getText().toString().trim()));
+            double pauseSeconds = Math.max(0.0,
+                    Double.parseDouble(pauseField.getText().toString().trim()));
+            int shots = Math.max(1,
+                    Integer.parseInt(countField.getText().toString().trim()));
+
+            long totalMs = plannedTotalMs(exposureSeconds, pauseSeconds, shots);
+            totalTimeView.setText("Total time: " + formatDuration(totalMs));
+            timeLeftView.setText("Time left: " + formatDuration(totalMs));
+        } catch (Exception ignored) {
+            totalTimeView.setText("Total time: --:--:--");
+            timeLeftView.setText("Time left: --:--:--");
+        }
+    }
+
+    private long plannedTotalMs(double exposureSeconds, double pauseSeconds, int shots) {
+        long exposureMs = (long)(exposureSeconds * 1000.0);
+        long pauseMs = (long)(pauseSeconds * 1000.0);
+        return (long)shots * exposureMs + (long)Math.max(0, shots - 1) * pauseMs;
+    }
+
+    private String formatDuration(long millis) {
+        long totalSeconds = Math.max(0, (millis + 999) / 1000);
+        long hours = totalSeconds / 3600;
+        long minutes = (totalSeconds % 3600) / 60;
+        long seconds = totalSeconds % 60;
+        return String.format(Locale.US, "%02d:%02d:%02d", hours, minutes, seconds);
     }
 
     private void stopNow() {
