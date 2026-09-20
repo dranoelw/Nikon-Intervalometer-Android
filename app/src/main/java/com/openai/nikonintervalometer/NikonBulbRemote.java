@@ -12,6 +12,8 @@ import java.nio.ByteOrder;
 import java.util.Arrays;
 
 public final class NikonBulbRemote {
+    private static final int NIKON_VENDOR_ID = 0x04B0;
+
     private static final int CONTAINER_COMMAND = 1;
     private static final int CONTAINER_DATA = 2;
     private static final int CONTAINER_RESPONSE = 3;
@@ -62,6 +64,7 @@ public final class NikonBulbRemote {
 
     public UsbDevice findCamera() {
         for (UsbDevice candidate : manager.getDeviceList().values()) {
+            if (candidate.getVendorId() != NIKON_VENDOR_ID) continue;
             for (int i = 0; i < candidate.getInterfaceCount(); i++) {
                 if (candidate.getInterface(i).getInterfaceClass() == UsbConstants.USB_CLASS_STILL_IMAGE) {
                     return candidate;
@@ -75,6 +78,9 @@ public final class NikonBulbRemote {
         disconnect();
 
         if (candidate == null) throw new Exception("No camera found");
+        if (candidate.getVendorId() != NIKON_VENDOR_ID) {
+            throw new Exception("Connected USB camera is not a Nikon");
+        }
         if (!manager.hasPermission(candidate)) throw new Exception("USB permission not granted");
 
         UsbInterface foundInterface = null;
@@ -224,9 +230,10 @@ public final class NikonBulbRemote {
     }
 
     public String getDeviceName() {
-        if (device == null) return "Camera";
+        if (device == null) return "Nikon Camera";
         String product = device.getProductName();
-        return product != null ? product : device.getDeviceName();
+        if (product != null && !product.trim().isEmpty()) return product;
+        return "Nikon Camera";
     }
 
     public void disconnect() {
