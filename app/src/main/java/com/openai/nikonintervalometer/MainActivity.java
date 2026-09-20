@@ -406,7 +406,7 @@ public final class MainActivity extends Activity {
 
     private void setCheck(TextView view, String label, boolean good) {
         view.setText((good ? "✓  " : "✕  ") + label);
-        view.setTextColor(good ? GREY : RED);
+        view.setTextColor(good ? RED : GREY);
     }
 
     private void openPlayback() {
@@ -757,10 +757,10 @@ public final class MainActivity extends Activity {
 
         if (reason == null) {
             countdown.setText("Ready");
-            countdown.setTextColor(GREY);
+            countdown.setTextColor(RED);
         } else {
             countdown.setText(reason);
-            countdown.setTextColor(RED);
+            countdown.setTextColor(GREY);
         }
     }
 
