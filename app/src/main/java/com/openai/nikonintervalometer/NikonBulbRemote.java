@@ -19,6 +19,8 @@ public final class NikonBulbRemote {
 
     // Nikon vendor operations used by libgphoto2 for Nikon DSLR capture.
     private static final int OC_NIKON_DEVICE_READY = 0x90C8;
+    private static final int OC_NIKON_START_LIVE_VIEW = 0x9201;
+    private static final int OC_NIKON_END_LIVE_VIEW = 0x9202;
     private static final int OC_NIKON_INITIATE_CAPTURE_REC_IN_MEDIA = 0x9207;
     private static final int OC_NIKON_TERMINATE_CAPTURE = 0x920C;
 
@@ -47,6 +49,7 @@ public final class NikonBulbRemote {
     private int transactionId = 1;
     private boolean sessionOpen = false;
     private volatile boolean captureOpen = false;
+    private volatile boolean liveViewActive = false;
 
     public NikonBulbRemote(UsbManager manager) {
         this.manager = manager;
@@ -118,6 +121,56 @@ public final class NikonBulbRemote {
 
         sessionOpen = true;
         waitUntilReady(30000);
+    }
+
+    public void startLiveView() throws Exception {
+        ensureConnected();
+        if (liveViewActive) return;
+
+        waitUntilReady(30000);
+        long deadline = System.currentTimeMillis() + 30000;
+        Response response;
+
+        do {
+            response = transact(OC_NIKON_START_LIVE_VIEW, new int[]{}, 15000);
+            if (response.code == RC_OK) {
+                liveViewActive = true;
+                // Give the body a moment to complete the mirror transition.
+                try { Thread.sleep(700); } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return;
+            }
+
+            if (!isBusy(response.code)) {
+                throw ptpException("Start Live View rejected", response.code);
+            }
+
+            waitUntilReady(Math.max(1000, deadline - System.currentTimeMillis()));
+        } while (System.currentTimeMillis() < deadline);
+
+        throw ptpException("Start Live View stayed busy", response.code);
+    }
+
+    public void endLiveView() throws Exception {
+        ensureConnected();
+        if (!liveViewActive) return;
+
+        Response response = transact(OC_NIKON_END_LIVE_VIEW, new int[]{}, 15000);
+        liveViewActive = false;
+
+        if (response.code != RC_OK && !isBusy(response.code)) {
+            throw ptpException("End Live View rejected", response.code);
+        }
+
+        // If the camera was momentarily busy, allow it to settle after the request.
+        try { Thread.sleep(500); } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    public boolean isLiveViewActive() {
+        return liveViewActive;
     }
 
     public void startCaptureNoAf() throws Exception {
@@ -194,6 +247,10 @@ public final class NikonBulbRemote {
                 try { stopCapture(); } catch (Exception ignored) {}
             }
 
+            if (liveViewActive) {
+                try { endLiveView(); } catch (Exception ignored) {}
+            }
+
             if (sessionOpen) {
                 try { transact(OC_CLOSE_SESSION, new int[]{}, 5000); } catch (Exception ignored) {}
             }
@@ -213,6 +270,7 @@ public final class NikonBulbRemote {
         transactionId = 1;
         sessionOpen = false;
         captureOpen = false;
+        liveViewActive = false;
     }
 
     private void waitUntilReady(long timeoutMs) throws Exception {
