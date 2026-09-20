@@ -8,6 +8,8 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
 import android.os.Bundle;
@@ -18,9 +20,11 @@ import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.WindowManager;
+import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ImageView;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -61,6 +65,14 @@ public final class MainActivity extends Activity {
     private Button connectButton;
     private Button startButton;
     private Button stopButton;
+    private Button playbackButton;
+    private Button previousButton;
+    private Button nextButton;
+    private ImageView playbackImage;
+    private TextView playbackStatus;
+    private LinearLayout playbackNav;
+    private int[] playbackHandles = new int[0];
+    private int playbackIndex = -1;
 
     private final Runnable cameraStatusPoller = new Runnable() {
         @Override public void run() {
@@ -154,24 +166,24 @@ public final class MainActivity extends Activity {
         root.addView(connectButton, conn);
 
         root.addView(label("Exposure time (seconds)"), fullWrap());
-        exposureField = numberField("10", true);
+        exposureField = numberField("", true);
         root.addView(exposureField, fullWrap());
 
-        root.addView(label("Pause after each exposure (seconds)"), topMargin(14));
-        pauseField = numberField("3", true);
-        root.addView(pauseField, fullWrap());
-
         root.addView(label("Number of exposures"), topMargin(14));
-        countField = numberField("3", false);
+        countField = numberField("", false);
         root.addView(countField, fullWrap());
 
-        totalTimeView = text("Total time: 00:00:36", 16);
+        root.addView(label("Pause after each exposure (seconds)"), topMargin(14));
+        pauseField = numberField("0", true);
+        root.addView(pauseField, fullWrap());
+
+        totalTimeView = text("Total time: --:--:--", 16);
         totalTimeView.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams totalLp = fullWrap();
         totalLp.setMargins(0, dp(20), 0, 0);
         root.addView(totalTimeView, totalLp);
 
-        timeLeftView = text("Time left: 00:00:36", 18);
+        timeLeftView = text("Time left: --:--:--", 18);
         timeLeftView.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams leftLp = fullWrap();
         leftLp.setMargins(0, dp(6), 0, 0);
@@ -208,6 +220,45 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams stopLp = fullWrap();
         stopLp.setMargins(0, dp(12), 0, 0);
         root.addView(stopButton, stopLp);
+
+        playbackButton = button("PLAYBACK");
+        playbackButton.setOnClickListener(v -> openPlayback());
+        LinearLayout.LayoutParams playbackLp = fullWrap();
+        playbackLp.setMargins(0, dp(18), 0, 0);
+        root.addView(playbackButton, playbackLp);
+
+        playbackStatus = text("Camera playback", 14);
+        playbackStatus.setGravity(Gravity.CENTER);
+        playbackStatus.setVisibility(View.GONE);
+        LinearLayout.LayoutParams playbackStatusLp = fullWrap();
+        playbackStatusLp.setMargins(0, dp(10), 0, dp(8));
+        root.addView(playbackStatus, playbackStatusLp);
+
+        playbackImage = new ImageView(this);
+        playbackImage.setAdjustViewBounds(true);
+        playbackImage.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        playbackImage.setBackgroundColor(OLED_BLACK);
+        playbackImage.setVisibility(View.GONE);
+        LinearLayout.LayoutParams imageLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(280));
+        root.addView(playbackImage, imageLp);
+
+        playbackNav = new LinearLayout(this);
+        playbackNav.setOrientation(LinearLayout.HORIZONTAL);
+        playbackNav.setGravity(Gravity.CENTER);
+        playbackNav.setVisibility(View.GONE);
+
+        previousButton = button("PREVIOUS");
+        nextButton = button("NEXT");
+        previousButton.setOnClickListener(v -> showPlaybackIndex(playbackIndex - 1));
+        nextButton.setOnClickListener(v -> showPlaybackIndex(playbackIndex + 1));
+
+        LinearLayout.LayoutParams navButtonLp = new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        navButtonLp.setMargins(dp(4), dp(8), dp(4), 0);
+        playbackNav.addView(previousButton, navButtonLp);
+        playbackNav.addView(nextButton, navButtonLp);
+        root.addView(playbackNav, fullWrap());
 
         LinearLayout checklist = new LinearLayout(this);
         checklist.setOrientation(LinearLayout.VERTICAL);
@@ -324,6 +375,77 @@ public final class MainActivity extends Activity {
     private void setCheck(TextView view, String label, boolean good) {
         view.setText((good ? "✓  " : "✕  ") + label);
         view.setTextColor(good ? GREEN : RED);
+    }
+
+    private void openPlayback() {
+        if (!camera.isConnected()) {
+            Toast.makeText(this, "Connect the camera first", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (running) return;
+
+        playbackButton.setEnabled(false);
+        playbackStatus.setVisibility(View.VISIBLE);
+        playbackStatus.setText("Loading photos…");
+
+        io.execute(() -> {
+            try {
+                int[] handles = camera.getImageHandles();
+                if (handles.length == 0) {
+                    main.post(() -> {
+                        playbackStatus.setText("No playable images found");
+                        playbackButton.setEnabled(true);
+                    });
+                    return;
+                }
+
+                playbackHandles = handles;
+                playbackIndex = handles.length - 1;
+                loadPlaybackImage(playbackIndex);
+            } catch (Exception e) {
+                main.post(() -> {
+                    playbackStatus.setText("Playback error: " + e.getMessage());
+                    playbackButton.setEnabled(true);
+                });
+            }
+        });
+    }
+
+    private void showPlaybackIndex(int index) {
+        if (running || index < 0 || index >= playbackHandles.length) return;
+        playbackButton.setEnabled(false);
+        previousButton.setEnabled(false);
+        nextButton.setEnabled(false);
+        io.execute(() -> loadPlaybackImage(index));
+    }
+
+    private void loadPlaybackImage(int index) {
+        try {
+            int handle = playbackHandles[index];
+            byte[] jpeg = camera.getThumbnail(handle);
+            Bitmap bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
+            if (bitmap == null) throw new Exception("Camera thumbnail could not be decoded");
+
+            main.post(() -> {
+                playbackIndex = index;
+                playbackImage.setImageBitmap(bitmap);
+                playbackImage.setVisibility(View.VISIBLE);
+                playbackStatus.setVisibility(View.VISIBLE);
+                playbackNav.setVisibility(View.VISIBLE);
+                playbackStatus.setText("Photo " + (index + 1) + " / " + playbackHandles.length);
+                previousButton.setEnabled(index > 0);
+                nextButton.setEnabled(index < playbackHandles.length - 1);
+                playbackButton.setEnabled(true);
+            });
+        } catch (Exception e) {
+            main.post(() -> {
+                playbackStatus.setVisibility(View.VISIBLE);
+                playbackStatus.setText("Playback error: " + e.getMessage());
+                playbackButton.setEnabled(true);
+                previousButton.setEnabled(playbackIndex > 0);
+                nextButton.setEnabled(playbackIndex >= 0 && playbackIndex < playbackHandles.length - 1);
+            });
+        }
     }
 
     private void startSequence() {
@@ -517,6 +639,10 @@ public final class MainActivity extends Activity {
         exposureField.setEnabled(!running);
         pauseField.setEnabled(!running);
         countField.setEnabled(!running);
+        if (playbackButton != null) playbackButton.setEnabled(connected && !running);
+        if (previousButton != null) previousButton.setEnabled(connected && !running && playbackIndex > 0);
+        if (nextButton != null) nextButton.setEnabled(connected && !running
+                && playbackIndex >= 0 && playbackIndex < playbackHandles.length - 1);
     }
 
     private void setStatus(String value) {
