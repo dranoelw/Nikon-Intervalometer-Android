@@ -29,6 +29,7 @@ public final class PtpCamera {
 
     private static final int PTP_RC_OK = 0x2001;
     private static final int PTP_RC_SESSION_ALREADY_OPEN = 0x201E;
+    private static final int PTP_RC_DEVICE_BUSY = 0x2019;
 
     private final UsbManager manager;
     private UsbDevice device;
@@ -98,8 +99,8 @@ public final class PtpCamera {
 
     public void capture() throws Exception {
         ensureConnected();
-        PtpResponse r = transact(PTP_OC_INITIATE_CAPTURE, new int[]{0, 0});
-        if (r.code != PTP_RC_OK) r = transact(PTP_OC_INITIATE_CAPTURE, new int[]{0xFFFFFFFF, 0});
+        PtpResponse r = transactRetryBusy(PTP_OC_INITIATE_CAPTURE, new int[]{0, 0}, 15000);
+        if (r.code != PTP_RC_OK) r = transactRetryBusy(PTP_OC_INITIATE_CAPTURE, new int[]{0xFFFFFFFF, 0}, 15000);
         if (r.code != PTP_RC_OK) throw ptpError("Capture failed", r.code);
     }
 
@@ -120,12 +121,12 @@ public final class PtpCamera {
         if (bulbOpen) throw new Exception("Bulb exposure is already running");
 
         // Nikon capture-to-card: no AF before capture, target = card.
-        PtpResponse r = transact(PTP_OC_NIKON_INITIATE_CAPTURE_REC_IN_MEDIA,
-                new int[]{0xFFFFFFFF, 0});
+        PtpResponse r = transactRetryBusy(PTP_OC_NIKON_INITIATE_CAPTURE_REC_IN_MEDIA,
+                new int[]{0xFFFFFFFF, 0}, 15000);
 
         // Some Nikon bodies accept the standard InitiateCapture path in Bulb instead.
         if (r.code != PTP_RC_OK) {
-            r = transact(PTP_OC_INITIATE_CAPTURE, new int[]{0, 0});
+            r = transactRetryBusy(PTP_OC_INITIATE_CAPTURE, new int[]{0, 0}, 15000);
         }
 
         if (r.code != PTP_RC_OK) {
@@ -138,8 +139,8 @@ public final class PtpCamera {
         ensureConnected();
         if (!bulbOpen) return;
 
-        PtpResponse r = transact(PTP_OC_NIKON_TERMINATE_CAPTURE,
-                new int[]{0xFFFFFFFF, 0});
+        PtpResponse r = transactRetryBusy(PTP_OC_NIKON_TERMINATE_CAPTURE,
+                new int[]{0xFFFFFFFF, 0}, 15000);
         bulbOpen = false;
 
         if (r.code != PTP_RC_OK) {
@@ -207,6 +208,22 @@ public final class PtpCamera {
         int tid = transactionId++;
         sendCommand(operationCode, tid, params);
         return readResponse(tid);
+    }
+
+    private PtpResponse transactRetryBusy(int operationCode, int[] params, long timeoutMs) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        PtpResponse r;
+        do {
+            r = transact(operationCode, params);
+            if (r.code != PTP_RC_DEVICE_BUSY) return r;
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return r;
+            }
+        } while (System.currentTimeMillis() < deadline);
+        return r;
     }
 
     private void sendCommand(int operationCode, int tid, int[] params) throws Exception {
