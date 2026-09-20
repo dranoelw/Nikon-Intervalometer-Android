@@ -6,6 +6,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
@@ -29,6 +30,11 @@ import java.util.concurrent.Executors;
 public final class MainActivity extends Activity {
     private static final String ACTION_USB_PERMISSION = "com.openai.nikonintervalometer.USB_PERMISSION";
 
+    private static final int OLED_BLACK = Color.BLACK;
+    private static final int RED = Color.rgb(255, 45, 45);
+    private static final int GREEN = Color.rgb(0, 230, 118);
+    private static final int DARK_BUTTON = Color.rgb(22, 22, 22);
+
     private UsbManager usbManager;
     private NikonBulbRemote camera;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
@@ -36,16 +42,31 @@ public final class MainActivity extends Activity {
 
     private volatile boolean running = false;
     private volatile boolean cancelRequested = false;
+    private volatile boolean statusCheckInFlight = false;
+    private boolean destroyed = false;
     private int completed = 0;
 
     private TextView status;
     private TextView countdown;
+    private TextView cameraModeCheck;
+    private TextView shutterCheck;
+    private TextView focusCheck;
     private EditText exposureField;
     private EditText pauseField;
     private EditText countField;
     private Button connectButton;
     private Button startButton;
     private Button stopButton;
+
+    private final Runnable cameraStatusPoller = new Runnable() {
+        @Override public void run() {
+            if (destroyed) return;
+            if (camera != null && camera.isConnected() && !running && !statusCheckInFlight) {
+                refreshCameraChecklist();
+            }
+            main.postDelayed(this, 1500);
+        }
+    };
 
     private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
@@ -58,6 +79,7 @@ public final class MainActivity extends Activity {
                 cancelRequested = true;
                 running = false;
                 camera.disconnect();
+                setChecklistUnknown();
                 setStatus("Camera disconnected");
                 updateButtons();
             }
@@ -67,6 +89,9 @@ public final class MainActivity extends Activity {
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        getWindow().setStatusBarColor(OLED_BLACK);
+        getWindow().setNavigationBarColor(OLED_BLACK);
+
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
         camera = new NikonBulbRemote(usbManager);
         buildUi();
@@ -80,36 +105,35 @@ public final class MainActivity extends Activity {
             registerReceiver(usbReceiver, filter);
         }
 
+        main.post(cameraStatusPoller);
         scanAndConnect();
     }
 
     private void buildUi() {
         ScrollView scroll = new ScrollView(this);
+        scroll.setBackgroundColor(OLED_BLACK);
+
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(24), dp(28), dp(24), dp(32));
         root.setGravity(Gravity.CENTER_HORIZONTAL);
+        root.setBackgroundColor(OLED_BLACK);
         scroll.addView(root);
 
-        TextView title = text("D3400 Bulb Remote", 28);
+        TextView title = text("Bulb Remote", 30);
         title.setGravity(Gravity.CENTER);
         root.addView(title, fullWrap());
 
-        TextView subtitle = text("USB remote: READY → START → wait → STOP", 14);
-        subtitle.setTextColor(Color.DKGRAY);
-        subtitle.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams sub = fullWrap();
-        sub.setMargins(0, dp(4), 0, dp(22));
-        root.addView(subtitle, sub);
-
         status = text("Looking for camera…", 16);
         status.setGravity(Gravity.CENTER);
-        root.addView(status, fullWrap());
+        LinearLayout.LayoutParams statusLp = fullWrap();
+        statusLp.setMargins(0, dp(12), 0, 0);
+        root.addView(status, statusLp);
 
         connectButton = button("CONNECT CAMERA");
         connectButton.setOnClickListener(v -> scanAndConnect());
         LinearLayout.LayoutParams conn = fullWrap();
-        conn.setMargins(0, dp(12), 0, dp(20));
+        conn.setMargins(0, dp(12), 0, dp(24));
         root.addView(connectButton, conn);
 
         root.addView(label("Exposure time (seconds)"), fullWrap());
@@ -144,15 +168,27 @@ public final class MainActivity extends Activity {
         stopLp.setMargins(0, dp(12), 0, 0);
         root.addView(stopButton, stopLp);
 
-        TextView note = text(
-                "Camera setup: M mode, shutter speed Bulb, memory card inserted, and manual focus recommended. " +
-                "The app waits for the camera to be ready, sends START without autofocus, times the exposure on the phone, sends STOP, then waits for the camera to be ready again.",
-                13);
-        note.setTextColor(Color.DKGRAY);
-        LinearLayout.LayoutParams noteLp = fullWrap();
-        noteLp.setMargins(0, dp(24), 0, 0);
-        root.addView(note, noteLp);
+        LinearLayout checklist = new LinearLayout(this);
+        checklist.setOrientation(LinearLayout.VERTICAL);
+        checklist.setPadding(dp(14), dp(14), dp(14), dp(14));
+        LinearLayout.LayoutParams checkBoxLp = fullWrap();
+        checkBoxLp.setMargins(0, dp(28), 0, 0);
+        root.addView(checklist, checkBoxLp);
 
+        TextView checkTitle = text("CAMERA CHECK", 14);
+        checkTitle.setTextColor(RED);
+        checklist.addView(checkTitle, fullWrap());
+
+        cameraModeCheck = checklistItem("Camera Mode: Manual");
+        checklist.addView(cameraModeCheck, topMargin(10));
+
+        shutterCheck = checklistItem("Shutter Speed: Bulb");
+        checklist.addView(shutterCheck, topMargin(8));
+
+        focusCheck = checklistItem("Autofocus: MF");
+        checklist.addView(focusCheck, topMargin(8));
+
+        setChecklistUnknown();
         setContentView(scroll);
         updateButtons();
     }
@@ -161,6 +197,7 @@ public final class MainActivity extends Activity {
         UsbDevice device = camera.findCamera();
         if (device == null) {
             setStatus("No Nikon/PTP camera detected");
+            setChecklistUnknown();
             updateButtons();
             return;
         }
@@ -187,14 +224,50 @@ public final class MainActivity extends Activity {
                 main.post(() -> {
                     setStatus("Connected: " + camera.getDeviceName());
                     updateButtons();
+                    refreshCameraChecklist();
                 });
             } catch (Exception e) {
                 main.post(() -> {
                     setStatus("Connection failed: " + e.getMessage());
+                    setChecklistUnknown();
                     updateButtons();
                 });
             }
         });
+    }
+
+    private void refreshCameraChecklist() {
+        if (!camera.isConnected() || running || statusCheckInFlight) return;
+        statusCheckInFlight = true;
+
+        io.execute(() -> {
+            try {
+                NikonBulbRemote.CameraSetup setup = camera.readCameraSetup();
+                main.post(() -> applyChecklist(setup));
+            } catch (Exception ignored) {
+                // A transient busy state should not turn a previously valid checklist into an error.
+            } finally {
+                statusCheckInFlight = false;
+            }
+        });
+    }
+
+    private void applyChecklist(NikonBulbRemote.CameraSetup setup) {
+        setCheck(cameraModeCheck, "Camera Mode: Manual", setup.manualMode);
+        setCheck(shutterCheck, "Shutter Speed: Bulb", setup.bulb);
+        setCheck(focusCheck, "Autofocus: MF", setup.manualFocus);
+    }
+
+    private void setChecklistUnknown() {
+        if (cameraModeCheck == null) return;
+        setCheck(cameraModeCheck, "Camera Mode: Manual", false);
+        setCheck(shutterCheck, "Shutter Speed: Bulb", false);
+        setCheck(focusCheck, "Autofocus: MF", false);
+    }
+
+    private void setCheck(TextView view, String label, boolean good) {
+        view.setText((good ? "✓  " : "✕  ") + label);
+        view.setTextColor(good ? GREEN : RED);
     }
 
     private void startSequence() {
@@ -229,9 +302,10 @@ public final class MainActivity extends Activity {
             for (int shot = 1; shot <= shots && !cancelRequested; shot++) {
                 int shotNo = shot;
 
-                main.post(() -> setStatus("Waiting for camera, then START"));
+                main.post(() -> setStatus("Waiting for camera…"));
                 camera.startCaptureNoAf();
 
+                main.post(() -> setStatus("Capturing"));
                 boolean fullExposure = exposureCountdown(shotNo, shots, exposureSeconds);
 
                 main.post(() -> setStatus("Sending STOP"));
@@ -240,7 +314,7 @@ public final class MainActivity extends Activity {
                 if (!fullExposure || cancelRequested) break;
 
                 completed = shot;
-                main.post(() -> setStatus("Exposure saved — camera ready"));
+                main.post(() -> setStatus("Exposure saved"));
 
                 if (shot < shots && pauseSeconds > 0) {
                     if (!countdownSleep("Next exposure in", pauseSeconds)) break;
@@ -267,7 +341,10 @@ public final class MainActivity extends Activity {
         } finally {
             running = false;
             cancelRequested = false;
-            main.post(this::updateButtons);
+            main.post(() -> {
+                updateButtons();
+                refreshCameraChecklist();
+            });
         }
     }
 
@@ -338,13 +415,17 @@ public final class MainActivity extends Activity {
         TextView view = new TextView(this);
         view.setText(value);
         view.setTextSize(size);
-        view.setTextColor(Color.BLACK);
+        view.setTextColor(RED);
         return view;
     }
 
     private TextView label(String value) {
-        TextView view = text(value, 14);
-        view.setTextColor(Color.DKGRAY);
+        return text(value, 14);
+    }
+
+    private TextView checklistItem(String value) {
+        TextView view = text(value, 18);
+        view.setPadding(0, dp(3), 0, dp(3));
         return view;
     }
 
@@ -353,6 +434,9 @@ public final class MainActivity extends Activity {
         field.setText(value);
         field.setTextSize(22);
         field.setSingleLine(true);
+        field.setTextColor(RED);
+        field.setHintTextColor(Color.rgb(120, 20, 20));
+        field.setBackgroundTintList(ColorStateList.valueOf(RED));
         field.setInputType(InputType.TYPE_CLASS_NUMBER |
                 (decimal ? InputType.TYPE_NUMBER_FLAG_DECIMAL : 0));
         field.setPadding(dp(12), dp(8), dp(12), dp(8));
@@ -363,6 +447,8 @@ public final class MainActivity extends Activity {
         Button button = new Button(this);
         button.setText(value);
         button.setAllCaps(false);
+        button.setTextColor(RED);
+        button.setBackgroundTintList(ColorStateList.valueOf(DARK_BUTTON));
         return button;
     }
 
@@ -383,6 +469,8 @@ public final class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        destroyed = true;
+        main.removeCallbacks(cameraStatusPoller);
         cancelRequested = true;
         try {
             if (camera.isCaptureOpen()) camera.stopCapture();
