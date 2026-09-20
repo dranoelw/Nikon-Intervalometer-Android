@@ -49,6 +49,7 @@ public final class MainActivity extends Activity {
     private Button connectButton;
     private Button startButton;
     private Button stopButton;
+    private boolean updatingLiveViewToggle = false;
 
     private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
@@ -61,6 +62,9 @@ public final class MainActivity extends Activity {
                 cancelRequested = true;
                 running = false;
                 camera.disconnect();
+                updatingLiveViewToggle = true;
+                liveViewCheck.setChecked(false);
+                updatingLiveViewToggle = false;
                 setStatus("Camera disconnected");
                 updateButtons();
             }
@@ -132,8 +136,12 @@ public final class MainActivity extends Activity {
         root.addView(delayField, fullWrap());
 
         liveViewCheck = new CheckBox(this);
-        liveViewCheck.setText("Keep mirror up (Live View)");
+        liveViewCheck.setText("Live View / mirror up");
         liveViewCheck.setTextSize(18);
+        liveViewCheck.setEnabled(false);
+        liveViewCheck.setOnCheckedChangeListener((buttonView, checked) -> {
+            if (!updatingLiveViewToggle) setLiveViewPersistent(checked);
+        });
         LinearLayout.LayoutParams lvLp = fullWrap();
         lvLp.setMargins(0, dp(16), 0, 0);
         root.addView(liveViewCheck, lvLp);
@@ -160,7 +168,7 @@ public final class MainActivity extends Activity {
 
         TextView note = text(
                 "Camera setup: M mode, shutter speed Bulb, memory card inserted, and manual focus recommended. " +
-                "This app does not meter or autofocus. With Live View enabled it raises the mirror before the sequence, keeps Live View active between exposures, and lowers it when the sequence ends.",
+                "Live View is independent of the exposure sequence: switch it ON to raise/keep the mirror up, and it stays ON until you switch it OFF, disconnect, or close the app.",
                 13);
         note.setTextColor(Color.DKGRAY);
         LinearLayout.LayoutParams noteLp = fullWrap();
@@ -199,12 +207,53 @@ public final class MainActivity extends Activity {
             try {
                 camera.connect(device);
                 main.post(() -> {
+                    updatingLiveViewToggle = true;
+                    liveViewCheck.setChecked(camera.isLiveViewActive());
+                    updatingLiveViewToggle = false;
                     setStatus("Connected: " + camera.getDeviceName());
                     updateButtons();
                 });
             } catch (Exception e) {
                 main.post(() -> {
                     setStatus("Connection failed: " + e.getMessage());
+                    updateButtons();
+                });
+            }
+        });
+    }
+
+    private void setLiveViewPersistent(boolean enabled) {
+        if (!camera.isConnected()) {
+            updatingLiveViewToggle = true;
+            liveViewCheck.setChecked(false);
+            updatingLiveViewToggle = false;
+            Toast.makeText(this, "Connect the camera first", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        liveViewCheck.setEnabled(false);
+        setStatus(enabled ? "Starting Live View — raising mirror…" : "Ending Live View — lowering mirror…");
+
+        io.execute(() -> {
+            try {
+                if (enabled) camera.startLiveView();
+                else camera.endLiveView();
+
+                main.post(() -> {
+                    updatingLiveViewToggle = true;
+                    liveViewCheck.setChecked(camera.isLiveViewActive());
+                    updatingLiveViewToggle = false;
+                    setStatus(camera.isLiveViewActive()
+                            ? "Live View ON — mirror up"
+                            : "Live View OFF — mirror down");
+                    updateButtons();
+                });
+            } catch (Exception e) {
+                main.post(() -> {
+                    updatingLiveViewToggle = true;
+                    liveViewCheck.setChecked(camera.isLiveViewActive());
+                    updatingLiveViewToggle = false;
+                    setStatus("Live View error: " + e.getMessage());
                     updateButtons();
                 });
             }
@@ -221,8 +270,6 @@ public final class MainActivity extends Activity {
         final double pauseSeconds;
         final double delaySeconds;
         final int shots;
-        final boolean keepMirrorUp = liveViewCheck.isChecked();
-
         try {
             exposureSeconds = Math.max(0.2, Double.parseDouble(exposureField.getText().toString().trim()));
             pauseSeconds = Math.max(0.0, Double.parseDouble(pauseField.getText().toString().trim()));
@@ -238,19 +285,11 @@ public final class MainActivity extends Activity {
         completed = 0;
         updateButtons();
 
-        io.execute(() -> runSequence(exposureSeconds, pauseSeconds, delaySeconds, shots, keepMirrorUp));
+        io.execute(() -> runSequence(exposureSeconds, pauseSeconds, delaySeconds, shots));
     }
 
-    private void runSequence(double exposureSeconds, double pauseSeconds, double delaySeconds, int shots, boolean keepMirrorUp) {
-        boolean liveViewStarted = false;
+    private void runSequence(double exposureSeconds, double pauseSeconds, double delaySeconds, int shots) {
         try {
-            if (keepMirrorUp) {
-                main.post(() -> setStatus("Starting Live View — raising mirror…"));
-                camera.startLiveView();
-                liveViewStarted = true;
-                main.post(() -> setStatus("Live View active — mirror up"));
-            }
-
             if (!countdownSleep("Starting in", delaySeconds)) return;
 
             for (int shot = 1; shot <= shots && !cancelRequested; shot++) {
@@ -294,14 +333,6 @@ public final class MainActivity extends Activity {
                 setStatus("Camera error: " + e.getMessage());
             });
         } finally {
-            if (liveViewStarted || camera.isLiveViewActive()) {
-                try {
-                    main.post(() -> setStatus("Ending Live View — lowering mirror…"));
-                    camera.endLiveView();
-                } catch (Exception e) {
-                    main.post(() -> setStatus("Live View stop warning: " + e.getMessage()));
-                }
-            }
             running = false;
             cancelRequested = false;
             main.post(this::updateButtons);
@@ -365,7 +396,7 @@ public final class MainActivity extends Activity {
         pauseField.setEnabled(!running);
         countField.setEnabled(!running);
         delayField.setEnabled(!running);
-        liveViewCheck.setEnabled(!running);
+        liveViewCheck.setEnabled(connected && !running);
     }
 
     private void setStatus(String value) {
