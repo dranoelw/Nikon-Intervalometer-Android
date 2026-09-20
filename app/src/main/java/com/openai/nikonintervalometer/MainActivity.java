@@ -428,7 +428,7 @@ public final class MainActivity extends Activity {
 
         io.execute(() -> {
             try {
-                int[] handles = camera.getImageHandles();
+                int[] handles = buildPlayableHandleList();
                 if (handles.length == 0) {
                     main.post(() -> {
                         playbackStatus.setText("No playable images found");
@@ -475,7 +475,7 @@ public final class MainActivity extends Activity {
 
         io.execute(() -> {
             try {
-                int[] handles = camera.getImageHandles();
+                int[] handles = buildPlayableHandleList();
                 if (handles.length == 0) throw new Exception("No playable images found");
                 playbackHandles = handles;
                 loadPlaybackImage(0, true);
@@ -487,6 +487,30 @@ public final class MainActivity extends Activity {
 
     private void loadPlaybackImage(int index) {
         loadPlaybackImage(index, true);
+    }
+
+    private int[] buildPlayableHandleList() throws Exception {
+        int[] allHandles = camera.getImageHandles();
+        if (allHandles.length == 0) return allHandles;
+
+        int[] validHandles = new int[allHandles.length];
+        int validCount = 0;
+
+        for (int handle : allHandles) {
+            try {
+                byte[] jpeg = camera.getThumbnail(handle);
+                Bitmap bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
+                if (bitmap != null) {
+                    validHandles[validCount++] = handle;
+                }
+            } catch (Exception ignored) {
+                // Skip non-image / non-previewable PTP objects.
+            }
+        }
+
+        int[] result = new int[validCount];
+        System.arraycopy(validHandles, 0, result, 0, validCount);
+        return result;
     }
 
     private void loadPlaybackImage(int index, boolean retryOnStaleHandle) {
@@ -517,7 +541,7 @@ public final class MainActivity extends Activity {
 
             if (staleHandle) {
                 try {
-                    int[] handles = camera.getImageHandles();
+                    int[] handles = buildPlayableHandleList();
                     if (handles.length == 0) throw new Exception("No playable images found");
                     playbackHandles = handles;
                     int retryIndex = Math.min(index, handles.length - 1);
