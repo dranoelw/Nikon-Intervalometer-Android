@@ -26,6 +26,7 @@ public final class NikonBulbRemote {
     private static final int OC_NIKON_INITIATE_CAPTURE_REC_IN_MEDIA = 0x9207;
     private static final int OC_NIKON_TERMINATE_CAPTURE = 0x920C;
 
+    private static final int PROP_BATTERY_LEVEL = 0x5001;
     private static final int PROP_FOCUS_MODE = 0x500A;
     private static final int PROP_EXPOSURE_TIME = 0x500D;
     private static final int PROP_EXPOSURE_PROGRAM = 0x500E;
@@ -130,6 +131,7 @@ public final class NikonBulbRemote {
     public CameraSetup readCameraSetup() throws Exception {
         ensureConnected();
 
+        int batteryLevel = getUint8Property(PROP_BATTERY_LEVEL);
         int exposureProgram = getUint16Property(PROP_EXPOSURE_PROGRAM);
         long exposureTime = getUint32Property(PROP_EXPOSURE_TIME);
         int focusMode = getUint16Property(PROP_FOCUS_MODE);
@@ -137,7 +139,8 @@ public final class NikonBulbRemote {
         return new CameraSetup(
                 exposureProgram == EXPOSURE_PROGRAM_MANUAL,
                 exposureTime == EXPOSURE_TIME_BULB,
-                focusMode == FOCUS_MODE_MANUAL);
+                focusMode == FOCUS_MODE_MANUAL,
+                batteryLevel);
     }
 
     public int[] getImageHandles() throws Exception {
@@ -251,6 +254,12 @@ public final class NikonBulbRemote {
         transactionId = 1;
         sessionOpen = false;
         captureOpen = false;
+    }
+
+    private int getUint8Property(int propertyCode) throws Exception {
+        byte[] data = getPropertyData(propertyCode);
+        if (data.length < 1) throw new Exception(String.format("Property 0x%04X returned no value", propertyCode));
+        return data[0] & 0xFF;
     }
 
     private int getUint16Property(int propertyCode) throws Exception {
@@ -469,11 +478,13 @@ public final class NikonBulbRemote {
         public final boolean manualMode;
         public final boolean bulb;
         public final boolean manualFocus;
+        public final int batteryLevel;
 
-        CameraSetup(boolean manualMode, boolean bulb, boolean manualFocus) {
+        CameraSetup(boolean manualMode, boolean bulb, boolean manualFocus, int batteryLevel) {
             this.manualMode = manualMode;
             this.bulb = bulb;
             this.manualFocus = manualFocus;
+            this.batteryLevel = batteryLevel;
         }
     }
 
