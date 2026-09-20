@@ -40,6 +40,8 @@ public final class MainActivity extends Activity {
     private static final int RED = Color.rgb(255, 45, 45);
     private static final int GREEN = Color.rgb(0, 230, 118);
     private static final int DARK_BUTTON = Color.rgb(22, 22, 22);
+    private static final int DISABLED_GREY = Color.rgb(110, 110, 110);
+    private static final int DISABLED_BUTTON = Color.rgb(12, 12, 12);
 
     private UsbManager usbManager;
     private NikonBulbRemote camera;
@@ -58,15 +60,16 @@ public final class MainActivity extends Activity {
     private TextView cameraModeCheck;
     private TextView shutterCheck;
     private TextView focusCheck;
+    private TextView batteryCheck;
     private TextView totalTimeView;
     private TextView timeLeftView;
     private EditText exposureField;
     private EditText pauseField;
     private EditText countField;
-    private Button connectButton;
     private Button startButton;
     private Button stopButton;
     private Button playbackButton;
+    private Button closePlaybackButton;
     private Button previousButton;
     private Button nextButton;
     private ImageView playbackImage;
@@ -160,12 +163,6 @@ public final class MainActivity extends Activity {
         statusLp.setMargins(0, dp(12), 0, 0);
         root.addView(status, statusLp);
 
-        connectButton = button("CONNECT CAMERA");
-        connectButton.setOnClickListener(v -> scanAndConnect());
-        LinearLayout.LayoutParams conn = fullWrap();
-        conn.setMargins(0, dp(12), 0, dp(24));
-        root.addView(connectButton, conn);
-
         root.addView(label("Exposure time (seconds)"), fullWrap());
         exposureField = numberField("", true);
         root.addView(exposureField, fullWrap());
@@ -229,6 +226,13 @@ public final class MainActivity extends Activity {
         playbackLp.setMargins(0, dp(18), 0, 0);
         root.addView(playbackButton, playbackLp);
 
+        closePlaybackButton = button("CLOSE PLAYBACK");
+        closePlaybackButton.setVisibility(View.GONE);
+        closePlaybackButton.setOnClickListener(v -> closePlayback());
+        LinearLayout.LayoutParams closePlaybackLp = fullWrap();
+        closePlaybackLp.setMargins(0, dp(18), 0, 0);
+        root.addView(closePlaybackButton, closePlaybackLp);
+
         playbackStatus = text("Camera playback", 14);
         playbackStatus.setGravity(Gravity.CENTER);
         playbackStatus.setVisibility(View.GONE);
@@ -281,6 +285,9 @@ public final class MainActivity extends Activity {
 
         focusCheck = checklistItem("Autofocus: MF");
         checklist.addView(focusCheck, topMargin(8));
+
+        batteryCheck = checklistItem("Battery: --%");
+        checklist.addView(batteryCheck, topMargin(8));
 
         setChecklistUnknown();
         setContentView(scroll);
@@ -365,6 +372,8 @@ public final class MainActivity extends Activity {
         setCheck(cameraModeCheck, "Camera Mode: Manual", setup.manualMode);
         setCheck(shutterCheck, "Shutter Speed: Bulb", setup.bulb);
         setCheck(focusCheck, "Autofocus: MF", setup.manualFocus);
+        batteryCheck.setText("Battery: " + setup.batteryLevel + "%");
+        batteryCheck.setTextColor(setup.batteryLevel <= 20 ? RED : GREEN);
 
         cameraSetupReady = setup.manualMode && setup.bulb && setup.manualFocus;
         if (!running) {
@@ -380,6 +389,10 @@ public final class MainActivity extends Activity {
         setCheck(cameraModeCheck, "Camera Mode: Manual", false);
         setCheck(shutterCheck, "Shutter Speed: Bulb", false);
         setCheck(focusCheck, "Autofocus: MF", false);
+        if (batteryCheck != null) {
+            batteryCheck.setText("Battery: --%");
+            batteryCheck.setTextColor(RED);
+        }
         if (!running && countdown != null) {
             countdown.setText("Not Ready");
             countdown.setTextColor(RED);
@@ -426,6 +439,16 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private void closePlayback() {
+        playbackImage.setImageDrawable(null);
+        playbackImage.setVisibility(View.GONE);
+        playbackStatus.setVisibility(View.GONE);
+        playbackNav.setVisibility(View.GONE);
+        closePlaybackButton.setVisibility(View.GONE);
+        playbackButton.setVisibility(View.VISIBLE);
+        playbackButton.setEnabled(camera.isConnected() && !running);
+    }
+
     private void showPlaybackIndex(int index) {
         if (running || index < 0 || index >= playbackHandles.length) return;
         playbackButton.setEnabled(false);
@@ -448,6 +471,8 @@ public final class MainActivity extends Activity {
                 playbackStatus.setVisibility(View.VISIBLE);
                 playbackNav.setVisibility(View.VISIBLE);
                 playbackStatus.setText("Photo " + (index + 1) + " / " + playbackHandles.length);
+                playbackButton.setVisibility(View.GONE);
+                closePlaybackButton.setVisibility(View.VISIBLE);
                 previousButton.setEnabled(index > 0);
                 nextButton.setEnabled(index < playbackHandles.length - 1);
                 playbackButton.setEnabled(true);
@@ -655,13 +680,17 @@ public final class MainActivity extends Activity {
 
     private void updateButtons() {
         boolean connected = camera != null && camera.isConnected();
-        startButton.setEnabled(connected && !running && cameraSetupReady);
+        boolean canStart = connected && !running && cameraSetupReady;
+        startButton.setEnabled(canStart);
+        startButton.setTextColor(canStart ? RED : DISABLED_GREY);
+        startButton.setBackgroundTintList(ColorStateList.valueOf(
+                canStart ? DARK_BUTTON : DISABLED_BUTTON));
         stopButton.setEnabled(running);
-        connectButton.setEnabled(!running);
         exposureField.setEnabled(!running);
         pauseField.setEnabled(!running);
         countField.setEnabled(!running);
         if (playbackButton != null) playbackButton.setEnabled(connected && !running);
+        if (closePlaybackButton != null) closePlaybackButton.setEnabled(!running);
         if (previousButton != null) previousButton.setEnabled(connected && !running && playbackIndex > 0);
         if (nextButton != null) nextButton.setEnabled(connected && !running
                 && playbackIndex >= 0 && playbackIndex < playbackHandles.length - 1);
