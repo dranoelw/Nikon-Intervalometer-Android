@@ -156,7 +156,7 @@ public final class MainActivity extends Activity {
         root.setBackgroundColor(OLED_BLACK);
         scroll.addView(root);
 
-        TextView title = text("Bulb Remote", 30);
+        TextView title = text("Intervalometer", 30);
         title.setGravity(Gravity.CENTER);
         root.addView(title, fullWrap());
 
