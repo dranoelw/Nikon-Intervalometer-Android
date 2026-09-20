@@ -200,7 +200,6 @@ public final class MainActivity extends Activity {
         exposureField.addTextChangedListener(timingWatcher);
         pauseField.addTextChangedListener(timingWatcher);
         countField.addTextChangedListener(timingWatcher);
-        updatePlannedTimes();
 
         countdown = text("Not Ready", 20);
         countdown.setTextColor(RED);
@@ -294,6 +293,7 @@ public final class MainActivity extends Activity {
 
         setChecklistUnknown();
         setContentView(scroll);
+        updatePlannedTimes();
         updateButtons();
     }
 
@@ -765,6 +765,9 @@ public final class MainActivity extends Activity {
     }
 
     private void updateButtons() {
+        if (startButton == null || stopButton == null
+                || exposureField == null || pauseField == null || countField == null) return;
+
         boolean connected = camera != null && camera.isConnected();
         boolean canStart = !running && isReadyToStart();
         startButton.setEnabled(canStart);
