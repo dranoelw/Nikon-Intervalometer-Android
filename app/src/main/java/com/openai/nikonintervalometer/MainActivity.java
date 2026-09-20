@@ -259,7 +259,7 @@ public final class MainActivity extends Activity {
         previousButton = button("PREVIOUS");
         nextButton = button("NEXT");
         previousButton.setOnClickListener(v -> showPlaybackIndex(playbackIndex - 1));
-        nextButton.setOnClickListener(v -> showPlaybackIndex(playbackIndex + 1));
+        nextButton.setOnClickListener(v -> showPlaybackIndex(\n                playbackIndex == playbackHandles.length - 1 ? 0 : playbackIndex + 1));
 
         LinearLayout.LayoutParams navButtonLp = new LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
@@ -478,7 +478,7 @@ public final class MainActivity extends Activity {
                 playbackButton.setVisibility(View.GONE);
                 closePlaybackButton.setVisibility(View.VISIBLE);
                 previousButton.setEnabled(index > 0);
-                nextButton.setEnabled(index < playbackHandles.length - 1);
+                nextButton.setEnabled(playbackHandles.length > 0);
                 playbackButton.setEnabled(true);
             });
         } catch (Exception e) {
@@ -487,7 +487,7 @@ public final class MainActivity extends Activity {
                 playbackStatus.setText("Playback error: " + e.getMessage());
                 playbackButton.setEnabled(true);
                 previousButton.setEnabled(playbackIndex > 0);
-                nextButton.setEnabled(playbackIndex >= 0 && playbackIndex < playbackHandles.length - 1);
+                nextButton.setEnabled(playbackHandles.length > 0 && playbackIndex >= 0);
             });
         }
     }
