@@ -38,7 +38,7 @@ public final class MainActivity extends Activity {
 
     private static final int OLED_BLACK = Color.BLACK;
     private static final int RED = Color.rgb(255, 45, 45);
-    private static final int GREEN = Color.rgb(0, 230, 118);
+    private static final int GREY = Color.rgb(170, 170, 170);
     private static final int DARK_BUTTON = Color.rgb(22, 22, 22);
     private static final int DISABLED_GREY = Color.rgb(110, 110, 110);
     private static final int DISABLED_BUTTON = Color.rgb(12, 12, 12);
@@ -373,12 +373,12 @@ public final class MainActivity extends Activity {
         setCheck(shutterCheck, "Shutter Speed: Bulb", setup.bulb);
         setCheck(focusCheck, "Autofocus: MF", setup.manualFocus);
         batteryCheck.setText("Battery: " + setup.batteryLevel + "%");
-        batteryCheck.setTextColor(setup.batteryLevel <= 20 ? RED : GREEN);
+        batteryCheck.setTextColor(RED);
 
         cameraSetupReady = setup.manualMode && setup.bulb && setup.manualFocus;
         if (!running) {
             countdown.setText(cameraSetupReady ? "Ready" : "Not Ready");
-            countdown.setTextColor(cameraSetupReady ? GREEN : RED);
+            countdown.setTextColor(cameraSetupReady ? GREY : RED);
         }
         updateButtons();
     }
@@ -402,7 +402,7 @@ public final class MainActivity extends Activity {
 
     private void setCheck(TextView view, String label, boolean good) {
         view.setText((good ? "✓  " : "✕  ") + label);
-        view.setTextColor(good ? GREEN : RED);
+        view.setTextColor(good ? GREY : RED);
     }
 
     private void openPlayback() {
