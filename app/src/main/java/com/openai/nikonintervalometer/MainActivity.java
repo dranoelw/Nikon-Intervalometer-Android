@@ -49,6 +49,7 @@ public final class MainActivity extends Activity {
     private volatile boolean running = false;
     private volatile boolean cancelRequested = false;
     private volatile boolean statusCheckInFlight = false;
+    private volatile boolean cameraSetupReady = false;
     private boolean destroyed = false;
     private int completed = 0;
 
@@ -201,7 +202,8 @@ public final class MainActivity extends Activity {
         countField.addTextChangedListener(timingWatcher);
         updatePlannedTimes();
 
-        countdown = text("Ready", 20);
+        countdown = text("Not Ready", 20);
+        countdown.setTextColor(RED);
         countdown.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams countLp = fullWrap();
         countLp.setMargins(0, dp(24), 0, dp(16));
@@ -363,13 +365,26 @@ public final class MainActivity extends Activity {
         setCheck(cameraModeCheck, "Camera Mode: Manual", setup.manualMode);
         setCheck(shutterCheck, "Shutter Speed: Bulb", setup.bulb);
         setCheck(focusCheck, "Autofocus: MF", setup.manualFocus);
+
+        cameraSetupReady = setup.manualMode && setup.bulb && setup.manualFocus;
+        if (!running) {
+            countdown.setText(cameraSetupReady ? "Ready" : "Not Ready");
+            countdown.setTextColor(cameraSetupReady ? GREEN : RED);
+        }
+        updateButtons();
     }
 
     private void setChecklistUnknown() {
+        cameraSetupReady = false;
         if (cameraModeCheck == null) return;
         setCheck(cameraModeCheck, "Camera Mode: Manual", false);
         setCheck(shutterCheck, "Shutter Speed: Bulb", false);
         setCheck(focusCheck, "Autofocus: MF", false);
+        if (!running && countdown != null) {
+            countdown.setText("Not Ready");
+            countdown.setTextColor(RED);
+        }
+        updateButtons();
     }
 
     private void setCheck(TextView view, String label, boolean good) {
@@ -453,6 +468,12 @@ public final class MainActivity extends Activity {
             Toast.makeText(this, "Connect the camera first", Toast.LENGTH_SHORT).show();
             return;
         }
+        if (!cameraSetupReady) {
+            countdown.setText("Not Ready");
+            countdown.setTextColor(RED);
+            Toast.makeText(this, "Camera check must be all green", Toast.LENGTH_SHORT).show();
+            return;
+        }
 
         final double exposureSeconds;
         final double pauseSeconds;
@@ -470,6 +491,7 @@ public final class MainActivity extends Activity {
         running = true;
         cancelRequested = false;
         completed = 0;
+        countdown.setTextColor(RED);
         updateButtons();
 
         long totalMs = plannedTotalMs(exposureSeconds, pauseSeconds, shots);
@@ -633,7 +655,7 @@ public final class MainActivity extends Activity {
 
     private void updateButtons() {
         boolean connected = camera != null && camera.isConnected();
-        startButton.setEnabled(connected && !running);
+        startButton.setEnabled(connected && !running && cameraSetupReady);
         stopButton.setEnabled(running);
         connectButton.setEnabled(!running);
         exposureField.setEnabled(!running);
