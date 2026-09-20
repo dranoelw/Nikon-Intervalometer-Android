@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- USB Still Image / PTP interface -->
-    <usb-device class="6" subclass="1" protocol="1" />
+    <!-- Nikon D3400: USB VID 0x04B0 (1200), PID 0x043D (1085) -->
+    <usb-device vendor-id="1200" product-id="1085" />
 </resources>
