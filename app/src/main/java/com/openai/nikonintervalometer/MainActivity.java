@@ -258,7 +258,13 @@ public final class MainActivity extends Activity {
 
         previousButton = button("PREVIOUS");
         nextButton = button("NEXT");
-        previousButton.setOnClickListener(v -> showPlaybackIndex(playbackIndex - 1));
+        previousButton.setOnClickListener(v -> {
+            if (playbackIndex == 0) {
+                refreshPlaybackAndShowLast();
+            } else {
+                showPlaybackIndex(playbackIndex - 1);
+            }
+        });
         nextButton.setOnClickListener(v -> {
             if (playbackIndex == playbackHandles.length - 1) {
                 refreshPlaybackAndShowFirst();
@@ -485,6 +491,24 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private void refreshPlaybackAndShowLast() {
+        if (running) return;
+        playbackButton.setEnabled(false);
+        previousButton.setEnabled(false);
+        nextButton.setEnabled(false);
+
+        io.execute(() -> {
+            try {
+                int[] handles = buildPlayableHandleList();
+                if (handles.length == 0) throw new Exception("No playable images found");
+                playbackHandles = handles;
+                loadPlaybackImage(handles.length - 1, true);
+            } catch (Exception e) {
+                showPlaybackError(e);
+            }
+        });
+    }
+
     private void loadPlaybackImage(int index) {
         loadPlaybackImage(index, true);
     }
@@ -529,7 +553,7 @@ public final class MainActivity extends Activity {
                 playbackStatus.setText("Photo " + (index + 1) + " / " + playbackHandles.length);
                 playbackButton.setVisibility(View.GONE);
                 closePlaybackButton.setVisibility(View.VISIBLE);
-                previousButton.setEnabled(index > 0);
+                previousButton.setEnabled(playbackHandles.length > 0);
                 nextButton.setEnabled(playbackHandles.length > 0);
                 playbackButton.setEnabled(true);
             });
@@ -563,7 +587,7 @@ public final class MainActivity extends Activity {
             playbackStatus.setVisibility(View.VISIBLE);
             playbackStatus.setText("Playback error: " + message);
             playbackButton.setEnabled(true);
-            previousButton.setEnabled(playbackIndex > 0);
+            previousButton.setEnabled(playbackHandles.length > 0 && playbackIndex >= 0);
             nextButton.setEnabled(playbackHandles.length > 0 && playbackIndex >= 0);
         });
     }
@@ -856,7 +880,8 @@ public final class MainActivity extends Activity {
         countField.setEnabled(!running);
         if (playbackButton != null) playbackButton.setEnabled(connected && !running);
         if (closePlaybackButton != null) closePlaybackButton.setEnabled(!running);
-        if (previousButton != null) previousButton.setEnabled(connected && !running && playbackIndex > 0);
+        if (previousButton != null) previousButton.setEnabled(connected && !running
+                && playbackHandles.length > 0 && playbackIndex >= 0);
         if (nextButton != null) nextButton.setEnabled(connected && !running
                 && playbackHandles.length > 0 && playbackIndex >= 0);
     }
