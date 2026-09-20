@@ -18,12 +18,15 @@ public final class NikonBulbRemote {
     private static final int OC_CLOSE_SESSION = 0x1003;
 
     // Nikon vendor operations used by libgphoto2 for Nikon DSLR capture.
+    private static final int OC_NIKON_DEVICE_READY = 0x90C8;
     private static final int OC_NIKON_INITIATE_CAPTURE_REC_IN_MEDIA = 0x9207;
     private static final int OC_NIKON_TERMINATE_CAPTURE = 0x920C;
 
     private static final int RC_OK = 0x2001;
     private static final int RC_DEVICE_BUSY = 0x2019;
     private static final int RC_SESSION_ALREADY_OPEN = 0x201E;
+    private static final int RC_NIKON_BULB_RELEASE_BUSY = 0xA200;
+    private static final int RC_NIKON_SILENT_RELEASE_BUSY = 0xA201;
 
     // Nikon 0x9207 parameter 1:
     // 0xFFFFFFFF = do NOT autofocus before capture
@@ -114,24 +117,39 @@ public final class NikonBulbRemote {
         }
 
         sessionOpen = true;
+        waitUntilReady(30000);
     }
 
     public void startCaptureNoAf() throws Exception {
         ensureConnected();
         if (captureOpen) throw new Exception("Capture is already open");
 
-        // Deliberately no fallback to generic InitiateCapture.
-        // We want Nikon's no-AF path only.
-        Response response = transact(
-                OC_NIKON_INITIATE_CAPTURE_REC_IN_MEDIA,
-                new int[]{NIKON_NO_AF, NIKON_CARD},
-                15000);
+        // First wait until Nikon explicitly reports that the body is ready.
+        waitUntilReady(30000);
 
-        if (response.code != RC_OK) {
-            throw ptpException("START rejected", response.code);
-        }
+        // There can still be a very small race between DeviceReady and START,
+        // so if START itself says "busy", go back through the ready loop and retry.
+        long deadline = System.currentTimeMillis() + 30000;
+        Response response;
+        do {
+            response = transact(
+                    OC_NIKON_INITIATE_CAPTURE_REC_IN_MEDIA,
+                    new int[]{NIKON_NO_AF, NIKON_CARD},
+                    15000);
 
-        captureOpen = true;
+            if (response.code == RC_OK) {
+                captureOpen = true;
+                return;
+            }
+
+            if (!isBusy(response.code)) {
+                throw ptpException("START rejected", response.code);
+            }
+
+            waitUntilReady(Math.max(1000, deadline - System.currentTimeMillis()));
+        } while (System.currentTimeMillis() < deadline);
+
+        throw ptpException("START stayed busy", response.code);
     }
 
     public void stopCapture() throws Exception {
@@ -151,6 +169,9 @@ public final class NikonBulbRemote {
             throw ptpException("STOP rejected", response.code);
         }
 
+        // After STOP, wait for the body/card write to finish before allowing
+        // the next exposure to start.
+        waitUntilReady(30000);
     }
 
     public boolean isCaptureOpen() {
@@ -192,6 +213,39 @@ public final class NikonBulbRemote {
         transactionId = 1;
         sessionOpen = false;
         captureOpen = false;
+    }
+
+    private void waitUntilReady(long timeoutMs) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        Response last = null;
+
+        while (System.currentTimeMillis() < deadline) {
+            last = transact(OC_NIKON_DEVICE_READY, new int[]{}, 5000);
+
+            if (last.code == RC_OK) return;
+
+            // libgphoto2 treats both ordinary DeviceBusy and Nikon's
+            // Bulb Release Busy as "not ready yet" and keeps polling.
+            if (!isBusy(last.code)) {
+                throw ptpException("Camera readiness check", last.code);
+            }
+
+            try {
+                Thread.sleep(250);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new Exception("Interrupted while waiting for camera");
+            }
+        }
+
+        if (last != null) throw ptpException("Camera stayed busy too long", last.code);
+        throw new Exception("Camera readiness check timed out");
+    }
+
+    private boolean isBusy(int code) {
+        return code == RC_DEVICE_BUSY
+                || code == RC_NIKON_BULB_RELEASE_BUSY
+                || code == RC_NIKON_SILENT_RELEASE_BUSY;
     }
 
     private Response transact(int operationCode, int[] params, int timeoutMs) throws Exception {
@@ -240,6 +294,8 @@ public final class NikonBulbRemote {
     private Exception ptpException(String operation, int code) {
         String hint = "";
         if (code == RC_DEVICE_BUSY) hint = " — camera busy";
+        else if (code == RC_NIKON_BULB_RELEASE_BUSY) hint = " — Nikon Bulb release busy";
+        else if (code == RC_NIKON_SILENT_RELEASE_BUSY) hint = " — Nikon silent release busy";
         else if (code == 0x2005) hint = " — operation not supported";
         else if (code == 0x200A) hint = " — invalid parameter";
         else if (code == 0xA008) hint = " — Nikon Bulb/shutter state";
