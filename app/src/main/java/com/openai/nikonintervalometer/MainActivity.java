@@ -259,7 +259,8 @@ public final class MainActivity extends Activity {
         previousButton = button("PREVIOUS");
         nextButton = button("NEXT");
         previousButton.setOnClickListener(v -> showPlaybackIndex(playbackIndex - 1));
-        nextButton.setOnClickListener(v -> showPlaybackIndex(\n                playbackIndex == playbackHandles.length - 1 ? 0 : playbackIndex + 1));
+        nextButton.setOnClickListener(v -> showPlaybackIndex(
+                playbackIndex == playbackHandles.length - 1 ? 0 : playbackIndex + 1));
 
         LinearLayout.LayoutParams navButtonLp = new LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
