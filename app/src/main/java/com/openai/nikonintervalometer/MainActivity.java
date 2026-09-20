@@ -16,6 +16,7 @@ import android.text.InputType;
 import android.view.Gravity;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -44,6 +45,7 @@ public final class MainActivity extends Activity {
     private EditText pauseField;
     private EditText countField;
     private EditText delayField;
+    private CheckBox liveViewCheck;
     private Button connectButton;
     private Button startButton;
     private Button stopButton;
@@ -129,6 +131,13 @@ public final class MainActivity extends Activity {
         delayField = numberField("0", true);
         root.addView(delayField, fullWrap());
 
+        liveViewCheck = new CheckBox(this);
+        liveViewCheck.setText("Keep mirror up (Live View)");
+        liveViewCheck.setTextSize(18);
+        LinearLayout.LayoutParams lvLp = fullWrap();
+        lvLp.setMargins(0, dp(16), 0, 0);
+        root.addView(liveViewCheck, lvLp);
+
         countdown = text("Ready", 20);
         countdown.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams countLp = fullWrap();
@@ -151,7 +160,7 @@ public final class MainActivity extends Activity {
 
         TextView note = text(
                 "Camera setup: M mode, shutter speed Bulb, memory card inserted, and manual focus recommended. " +
-                "This app does not meter or autofocus. It only sends Nikon START/STOP capture commands and times the exposure on the phone.",
+                "This app does not meter or autofocus. With Live View enabled it raises the mirror before the sequence, keeps Live View active between exposures, and lowers it when the sequence ends.",
                 13);
         note.setTextColor(Color.DKGRAY);
         LinearLayout.LayoutParams noteLp = fullWrap();
@@ -212,6 +221,7 @@ public final class MainActivity extends Activity {
         final double pauseSeconds;
         final double delaySeconds;
         final int shots;
+        final boolean keepMirrorUp = liveViewCheck.isChecked();
 
         try {
             exposureSeconds = Math.max(0.2, Double.parseDouble(exposureField.getText().toString().trim()));
@@ -228,11 +238,19 @@ public final class MainActivity extends Activity {
         completed = 0;
         updateButtons();
 
-        io.execute(() -> runSequence(exposureSeconds, pauseSeconds, delaySeconds, shots));
+        io.execute(() -> runSequence(exposureSeconds, pauseSeconds, delaySeconds, shots, keepMirrorUp));
     }
 
-    private void runSequence(double exposureSeconds, double pauseSeconds, double delaySeconds, int shots) {
+    private void runSequence(double exposureSeconds, double pauseSeconds, double delaySeconds, int shots, boolean keepMirrorUp) {
+        boolean liveViewStarted = false;
         try {
+            if (keepMirrorUp) {
+                main.post(() -> setStatus("Starting Live View — raising mirror…"));
+                camera.startLiveView();
+                liveViewStarted = true;
+                main.post(() -> setStatus("Live View active — mirror up"));
+            }
+
             if (!countdownSleep("Starting in", delaySeconds)) return;
 
             for (int shot = 1; shot <= shots && !cancelRequested; shot++) {
@@ -276,6 +294,14 @@ public final class MainActivity extends Activity {
                 setStatus("Camera error: " + e.getMessage());
             });
         } finally {
+            if (liveViewStarted || camera.isLiveViewActive()) {
+                try {
+                    main.post(() -> setStatus("Ending Live View — lowering mirror…"));
+                    camera.endLiveView();
+                } catch (Exception e) {
+                    main.post(() -> setStatus("Live View stop warning: " + e.getMessage()));
+                }
+            }
             running = false;
             cancelRequested = false;
             main.post(this::updateButtons);
@@ -339,6 +365,7 @@ public final class MainActivity extends Activity {
         pauseField.setEnabled(!running);
         countField.setEnabled(!running);
         delayField.setEnabled(!running);
+        liveViewCheck.setEnabled(!running);
     }
 
     private void setStatus(String value) {
@@ -397,6 +424,9 @@ public final class MainActivity extends Activity {
         cancelRequested = true;
         try {
             if (camera.isCaptureOpen()) camera.stopCapture();
+        } catch (Exception ignored) {}
+        try {
+            if (camera.isLiveViewActive()) camera.endLiveView();
         } catch (Exception ignored) {}
         try { unregisterReceiver(usbReceiver); } catch (Exception ignored) {}
         camera.disconnect();
