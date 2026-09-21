@@ -15,7 +15,6 @@ import android.hardware.usb.UsbManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.SystemClock;
 import android.text.InputType;
 import android.text.Editable;
 import android.text.TextWatcher;
@@ -57,9 +56,7 @@ public final class MainActivity extends Activity {
     private volatile boolean manualModeReady = false;
     private volatile boolean bulbReady = false;
     private volatile boolean focusReady = false;
-    private volatile boolean automaticMirrorDelayReady = false;
-    private volatile boolean liveViewMirrorFallbackReady = false;
-    private volatile boolean liveViewFallbackEnabled = false;
+    private volatile boolean suppressLiveViewToggleCallback = false;
     private boolean destroyed = false;
     private int completed = 0;
 
@@ -68,14 +65,13 @@ public final class MainActivity extends Activity {
     private TextView cameraModeCheck;
     private TextView shutterCheck;
     private TextView focusCheck;
-    private TextView mirrorDelayCheck;
-    private Switch liveViewToggle;
     private TextView batteryCheck;
     private TextView totalTimeView;
     private TextView timeLeftView;
     private EditText exposureField;
     private EditText pauseField;
     private EditText countField;
+    private Switch liveViewToggle;
     private Button startButton;
     private Button stopButton;
     private Button playbackButton;
@@ -186,15 +182,15 @@ public final class MainActivity extends Activity {
         root.addView(pauseField, fullWrap());
 
         liveViewToggle = new Switch(this);
-        liveViewToggle.setText("Use Live View mirror fallback");
+        liveViewToggle.setText("Live View");
+        liveViewToggle.setTextSize(18);
         liveViewToggle.setTextColor(RED);
-        liveViewToggle.setChecked(false);
         liveViewToggle.setEnabled(false);
         liveViewToggle.setOnCheckedChangeListener((buttonView, isChecked) -> {
-            liveViewFallbackEnabled = isChecked;
-            if (!running) updatePlannedTimes();
+            if (suppressLiveViewToggleCallback || running) return;
+            setLiveViewFromToggle(isChecked);
         });
-        root.addView(liveViewToggle, topMargin(14));
+        root.addView(liveViewToggle, topMargin(16));
 
         totalTimeView = text("Total time: --:--:--", 16);
         totalTimeView.setGravity(Gravity.CENTER);
@@ -318,9 +314,6 @@ public final class MainActivity extends Activity {
         focusCheck = checklistItem("Autofocus: MF");
         checklist.addView(focusCheck, topMargin(8));
 
-        mirrorDelayCheck = checklistItem("Mirror delay: checking…");
-        checklist.addView(mirrorDelayCheck, topMargin(8));
-
         batteryCheck = checklistItem("Camera Battery: --%");
         checklist.addView(batteryCheck, topMargin(8));
 
@@ -395,9 +388,20 @@ public final class MainActivity extends Activity {
         io.execute(() -> {
             try {
                 NikonBulbRemote.CameraSetup setup = camera.readCameraSetup();
-                NikonBulbRemote.ExposureDelayInfo delayInfo = camera.readExposureDelayInfo();
-                boolean liveViewAvailable = camera.isLiveViewAvailable();
-                main.post(() -> applyChecklist(setup, delayInfo, liveViewAvailable));
+                boolean liveViewActive = false;
+                boolean liveViewReadable = false;
+                try {
+                    liveViewActive = camera.isLiveViewActive();
+                    liveViewReadable = true;
+                } catch (Exception ignored) {
+                    // Some bodies may not expose the Live View status property.
+                }
+                boolean finalLiveViewActive = liveViewActive;
+                boolean finalLiveViewReadable = liveViewReadable;
+                main.post(() -> {
+                    applyChecklist(setup);
+                    syncLiveViewToggle(finalLiveViewActive, finalLiveViewReadable);
+                });
             } catch (Exception ignored) {
                 // A transient busy state should not turn a previously valid checklist into an error.
             } finally {
@@ -406,10 +410,7 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void applyChecklist(
-            NikonBulbRemote.CameraSetup setup,
-            NikonBulbRemote.ExposureDelayInfo delayInfo,
-            boolean liveViewAvailable) {
+    private void applyChecklist(NikonBulbRemote.CameraSetup setup) {
         manualModeReady = setup.manualMode;
         bulbReady = setup.bulb;
         focusReady = setup.manualFocus;
@@ -417,39 +418,10 @@ public final class MainActivity extends Activity {
         setCheck(cameraModeCheck, "Camera Mode: Manual", manualModeReady);
         setCheck(shutterCheck, "Shutter Speed: Bulb", bulbReady);
         setCheck(focusCheck, "Autofocus: MF", focusReady);
-
-        automaticMirrorDelayReady = delayInfo.canAutoConfigureTwoSeconds();
-        liveViewMirrorFallbackReady = !automaticMirrorDelayReady && liveViewAvailable;
-        if (liveViewToggle != null) {
-            liveViewToggle.setEnabled(liveViewMirrorFallbackReady && !running);
-            if (!liveViewMirrorFallbackReady && liveViewToggle.isChecked()) {
-                liveViewToggle.setChecked(false);
-            }
-        }
-
-        if (automaticMirrorDelayReady) {
-            mirrorDelayCheck.setText("✓  Mirror delay: automatic 2 s");
-            mirrorDelayCheck.setTextColor(RED);
-        } else if (liveViewMirrorFallbackReady) {
-            mirrorDelayCheck.setText(
-                    liveViewFallbackEnabled
-                            ? "✓  Mirror delay: Live View fallback enabled"
-                            : "•  Mirror delay: Live View fallback available");
-            mirrorDelayCheck.setTextColor(
-                    liveViewFallbackEnabled ? RED : GREY);
-        } else if (delayInfo.supported) {
-            mirrorDelayCheck.setText("•  Mirror delay: set 2 s in camera menu");
-            mirrorDelayCheck.setTextColor(GREY);
-        } else {
-            mirrorDelayCheck.setText("—  Mirror delay: unavailable");
-            mirrorDelayCheck.setTextColor(GREY);
-        }
-
         batteryCheck.setText("Camera Battery: " + setup.batteryLevel + "%");
         batteryCheck.setTextColor(RED);
 
         cameraSetupReady = manualModeReady && bulbReady && focusReady;
-        updatePlannedTimes();
         updateReadinessStatus();
         updateButtons();
     }
@@ -459,25 +431,15 @@ public final class MainActivity extends Activity {
         manualModeReady = false;
         bulbReady = false;
         focusReady = false;
-        automaticMirrorDelayReady = false;
-        liveViewMirrorFallbackReady = false;
-        liveViewFallbackEnabled = false;
-        if (liveViewToggle != null) {
-            liveViewToggle.setChecked(false);
-            liveViewToggle.setEnabled(false);
-        }
         if (cameraModeCheck == null) return;
         setCheck(cameraModeCheck, "Camera Mode: Manual", false);
         setCheck(shutterCheck, "Shutter Speed: Bulb", false);
         setCheck(focusCheck, "Autofocus: MF", false);
-        if (mirrorDelayCheck != null) {
-            mirrorDelayCheck.setText("—  Mirror delay: unknown");
-            mirrorDelayCheck.setTextColor(GREY);
-        }
         if (batteryCheck != null) {
             batteryCheck.setText("Camera Battery: --%");
             batteryCheck.setTextColor(RED);
         }
+        syncLiveViewToggle(false, false);
         updateReadinessStatus();
         updateButtons();
     }
@@ -485,6 +447,45 @@ public final class MainActivity extends Activity {
     private void setCheck(TextView view, String label, boolean good) {
         view.setText((good ? "✓  " : "✕  ") + label);
         view.setTextColor(good ? RED : GREY);
+    }
+
+    private void syncLiveViewToggle(boolean active, boolean readable) {
+        if (liveViewToggle == null) return;
+
+        suppressLiveViewToggleCallback = true;
+        liveViewToggle.setChecked(readable && active);
+        liveViewToggle.setEnabled(readable && !running);
+        suppressLiveViewToggleCallback = false;
+    }
+
+    private void setLiveViewFromToggle(boolean enabled) {
+        if (!camera.isConnected()) {
+            syncLiveViewToggle(false, false);
+            return;
+        }
+
+        liveViewToggle.setEnabled(false);
+        setStatus(enabled ? "Starting Live View…" : "Stopping Live View…");
+
+        io.execute(() -> {
+            try {
+                if (enabled) camera.startLiveView();
+                else camera.stopLiveView();
+
+                boolean active = camera.isLiveViewActive();
+                main.post(() -> {
+                    syncLiveViewToggle(active, true);
+                    setStatus(active ? "Live View on" : "Live View off");
+                    updateButtons();
+                });
+            } catch (Exception e) {
+                main.post(() -> {
+                    setStatus("Live View error: " + e.getMessage());
+                    refreshCameraChecklist();
+                    updateButtons();
+                });
+            }
+        });
     }
 
     private void openPlayback() {
@@ -688,120 +689,35 @@ public final class MainActivity extends Activity {
         countdown.setTextColor(RED);
         updateButtons();
 
-        long totalMs = plannedTotalMs(
-                exposureSeconds,
-                pauseSeconds,
-                shots,
-                automaticMirrorDelayReady,
-                liveViewMirrorFallbackReady && liveViewFallbackEnabled);
+        long totalMs = plannedTotalMs(exposureSeconds, pauseSeconds, shots);
         totalTimeView.setText("Total time: " + formatDuration(totalMs));
         timeLeftView.setText("Time left: " + formatDuration(totalMs));
 
-        io.execute(() -> runSequence(exposureSeconds, pauseSeconds, shots));
+        final boolean keepLiveView = liveViewToggle != null && liveViewToggle.isChecked();
+        io.execute(() -> runSequence(exposureSeconds, pauseSeconds, shots, keepLiveView));
     }
 
-    private void runSequence(double exposureSeconds, double pauseSeconds, int shots) {
-        NikonBulbRemote.ExposureDelaySession delaySession =
-                camera.prepareTwoSecondExposureDelay();
-        NikonBulbRemote.LiveViewSession liveViewSession = null;
-
-        if (!delaySession.configured
-                && liveViewFallbackEnabled
-                && liveViewMirrorFallbackReady) {
-            liveViewSession = camera.prepareLiveViewMirrorFallback();
-        }
-
+    private void runSequence(
+            double exposureSeconds,
+            double pauseSeconds,
+            int shots,
+            boolean keepLiveView) {
         try {
-            boolean usingExposureDelay = delaySession.configured;
-            boolean usingLiveViewFallback =
-                    !usingExposureDelay && liveViewSession != null && liveViewSession.available;
-
-            long actualTotalMs = plannedTotalMs(
-                    exposureSeconds,
-                    pauseSeconds,
-                    shots,
-                    usingExposureDelay,
-                    usingLiveViewFallback);
-            main.post(() -> {
-                totalTimeView.setText("Total time: " + formatDuration(actualTotalMs));
-                timeLeftView.setText("Time left: " + formatDuration(actualTotalMs));
-            });
-
-            if (usingExposureDelay) {
-                String delayMessage = delaySession.message;
-                main.post(() -> setStatus(delayMessage));
-            } else if (usingLiveViewFallback) {
-                main.post(() -> setStatus("Live View raised mirror — settling 2 s"));
-                if (!mirrorDelayCountdown(
-                        1,
-                        shots,
-                        exposureSeconds,
-                        pauseSeconds,
-                        2000L,
-                        false)) {
-                    return;
-                }
-            } else {
-                main.post(() -> setStatus("Mirror delay unavailable — normal Bulb capture"));
-            }
-
             for (int shot = 1; shot <= shots && !cancelRequested; shot++) {
                 int shotNo = shot;
 
-                if (usingLiveViewFallback && shot > 1) {
-                    boolean restarted = camera.ensureLiveView(liveViewSession);
-                    if (restarted) {
-                        main.post(() -> setStatus(
-                                "Live View restarted — settling mirror 2 s"));
-                        if (!mirrorDelayCountdown(
-                                shotNo,
-                                shots,
-                                exposureSeconds,
-                                pauseSeconds,
-                                2000L,
-                                false)) {
-                            break;
-                        }
-                    }
+                if (keepLiveView && !camera.isLiveViewActive()) {
+                    main.post(() -> setStatus("Starting Live View…"));
+                    camera.startLiveView();
                 }
 
                 main.post(() -> setStatus(
-                        usingExposureDelay
-                                ? "Mirror up / waiting for 2 s delay…"
-                                : usingLiveViewFallback
-                                        ? "Live View mirror up — starting exposure"
-                                        : "Waiting for camera…"));
-
-                long startCommandAt = SystemClock.elapsedRealtime();
+                        keepLiveView ? "Live View on — starting exposure" : "Waiting for camera…"));
                 camera.startCaptureNoAf();
-                long startCommandMs = SystemClock.elapsedRealtime() - startCommandAt;
-
-                if (usingExposureDelay) {
-                    long remainingMirrorDelayMs = Math.max(0, 2000 - startCommandMs);
-                    if (!mirrorDelayCountdown(
-                            shotNo,
-                            shots,
-                            exposureSeconds,
-                            pauseSeconds,
-                            remainingMirrorDelayMs,
-                            true)) {
-                        try { camera.stopCapture(); } catch (Exception ignored) {}
-                        break;
-                    }
-                }
-
-                if (cancelRequested) {
-                    try { camera.stopCapture(); } catch (Exception ignored) {}
-                    break;
-                }
 
                 main.post(() -> setStatus("Capturing"));
                 boolean fullExposure = exposureCountdown(
-                        shotNo,
-                        shots,
-                        exposureSeconds,
-                        pauseSeconds,
-                        usingExposureDelay);
+                        shotNo, shots, exposureSeconds, pauseSeconds);
 
                 main.post(() -> setStatus("Sending STOP"));
                 camera.stopCapture();
@@ -812,12 +728,7 @@ public final class MainActivity extends Activity {
                 main.post(() -> setStatus("Exposure saved"));
 
                 if (shot < shots && pauseSeconds > 0) {
-                    if (!pauseCountdown(
-                            shotNo,
-                            shots,
-                            exposureSeconds,
-                            pauseSeconds,
-                            usingExposureDelay)) break;
+                    if (!pauseCountdown(shotNo, shots, exposureSeconds, pauseSeconds)) break;
                 }
             }
 
@@ -840,8 +751,11 @@ public final class MainActivity extends Activity {
                 setStatus("Camera error: " + e.getMessage());
             });
         } finally {
-            camera.endLiveViewFallback(liveViewSession);
-            camera.restoreExposureDelay(delaySession);
+            if (keepLiveView && camera.isConnected()) {
+                try {
+                    if (!camera.isLiveViewActive()) camera.startLiveView();
+                } catch (Exception ignored) {}
+            }
             running = false;
             cancelRequested = false;
             main.post(() -> {
@@ -851,58 +765,7 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private boolean mirrorDelayCountdown(
-            int shot,
-            int total,
-            double exposureSeconds,
-            double pauseSeconds,
-            long remainingMirrorDelayMs,
-            boolean futureShotsAlsoHaveMirrorDelay) {
-
-        long exposureMs = (long)(exposureSeconds * 1000.0);
-        long pauseMs = (long)(pauseSeconds * 1000.0);
-        long end = SystemClock.elapsedRealtime() + Math.max(0, remainingMirrorDelayMs);
-
-        while (!cancelRequested) {
-            long remaining = end - SystemClock.elapsedRealtime();
-            if (remaining <= 0) return true;
-
-            long futureCurrentExposureMs = exposureMs;
-            long futureMirrorMs = futureShotsAlsoHaveMirrorDelay ? 2000L : 0L;
-            long futureShotCyclesMs =
-                    (long)(total - shot) * (futureMirrorMs + exposureMs);
-            long futurePauseMs = (long)Math.max(0, total - shot) * pauseMs;
-            long sequenceRemaining =
-                    remaining + futureCurrentExposureMs + futureShotCyclesMs + futurePauseMs;
-            double remainingSec = remaining / 1000.0;
-
-            main.post(() -> {
-                countdown.setText(String.format(
-                        Locale.US,
-                        "Mirror delay %d / %d — %.1f s",
-                        shot,
-                        total,
-                        remainingSec));
-                timeLeftView.setText("Time left: " + formatDuration(sequenceRemaining));
-            });
-
-            try {
-                Thread.sleep(Math.min(100, Math.max(1, remaining)));
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return false;
-            }
-        }
-
-        return false;
-    }
-
-    private boolean exposureCountdown(
-            int shot,
-            int total,
-            double exposureSeconds,
-            double pauseSeconds,
-            boolean includeMirrorDelay) {
+    private boolean exposureCountdown(int shot, int total, double exposureSeconds, double pauseSeconds) {
         long exposureMs = (long)(exposureSeconds * 1000.0);
         long pauseMs = (long)(pauseSeconds * 1000.0);
         long end = System.currentTimeMillis() + exposureMs;
@@ -911,8 +774,7 @@ public final class MainActivity extends Activity {
             long remaining = end - System.currentTimeMillis();
             if (remaining <= 0) return true;
 
-            long mirrorDelayMs = includeMirrorDelay ? 2000L : 0L;
-            long futureMs = (long)(total - shot) * (exposureMs + mirrorDelayMs)
+            long futureMs = (long)(total - shot) * exposureMs
                     + (long)(total - shot) * pauseMs;
             long sequenceRemaining = remaining + futureMs;
             double remainingSec = remaining / 1000.0;
@@ -933,12 +795,7 @@ public final class MainActivity extends Activity {
         return false;
     }
 
-    private boolean pauseCountdown(
-            int shot,
-            int total,
-            double exposureSeconds,
-            double pauseSeconds,
-            boolean includeMirrorDelay) {
+    private boolean pauseCountdown(int shot, int total, double exposureSeconds, double pauseSeconds) {
         long exposureMs = (long)(exposureSeconds * 1000.0);
         long pauseMs = (long)(pauseSeconds * 1000.0);
         long end = System.currentTimeMillis() + pauseMs;
@@ -947,12 +804,9 @@ public final class MainActivity extends Activity {
             long remaining = end - System.currentTimeMillis();
             if (remaining <= 0) return true;
 
-            long mirrorDelayMs = includeMirrorDelay ? 2000L : 0L;
             long futureExposureMs = (long)(total - shot) * exposureMs;
-            long futureMirrorDelayMs = (long)(total - shot) * mirrorDelayMs;
             long futurePauseMs = (long)Math.max(0, total - shot - 1) * pauseMs;
-            long sequenceRemaining =
-                    remaining + futureExposureMs + futureMirrorDelayMs + futurePauseMs;
+            long sequenceRemaining = remaining + futureExposureMs + futurePauseMs;
             double remainingSec = remaining / 1000.0;
 
             main.post(() -> {
@@ -980,12 +834,7 @@ public final class MainActivity extends Activity {
             int shots = Math.max(1,
                     Integer.parseInt(countField.getText().toString().trim()));
 
-            long totalMs = plannedTotalMs(
-                    exposureSeconds,
-                    pauseSeconds,
-                    shots,
-                    automaticMirrorDelayReady,
-                    liveViewMirrorFallbackReady && liveViewFallbackEnabled);
+            long totalMs = plannedTotalMs(exposureSeconds, pauseSeconds, shots);
             totalTimeView.setText("Total time: " + formatDuration(totalMs));
             timeLeftView.setText("Time left: " + formatDuration(totalMs));
         } catch (Exception ignored) {
@@ -996,19 +845,10 @@ public final class MainActivity extends Activity {
         updateButtons();
     }
 
-    private long plannedTotalMs(
-            double exposureSeconds,
-            double pauseSeconds,
-            int shots,
-            boolean includePerShotMirrorDelay,
-            boolean includeInitialLiveViewSettle) {
+    private long plannedTotalMs(double exposureSeconds, double pauseSeconds, int shots) {
         long exposureMs = (long)(exposureSeconds * 1000.0);
         long pauseMs = (long)(pauseSeconds * 1000.0);
-        long perShotMirrorDelayMs = includePerShotMirrorDelay ? 2000L : 0L;
-        long liveViewSettleMs = includeInitialLiveViewSettle ? 2000L : 0L;
-        return (long)shots * (exposureMs + perShotMirrorDelayMs)
-                + (long)Math.max(0, shots - 1) * pauseMs
-                + liveViewSettleMs;
+        return (long)shots * exposureMs + (long)Math.max(0, shots - 1) * pauseMs;
     }
 
     private String formatDuration(long millis) {
@@ -1122,7 +962,7 @@ public final class MainActivity extends Activity {
         pauseField.setEnabled(!running);
         countField.setEnabled(!running);
         if (liveViewToggle != null) {
-            liveViewToggle.setEnabled(!running && liveViewMirrorFallbackReady);
+            liveViewToggle.setEnabled(connected && !running);
         }
         if (playbackButton != null) playbackButton.setEnabled(connected && !running);
         if (closePlaybackButton != null) closePlaybackButton.setEnabled(!running);
@@ -1199,6 +1039,9 @@ public final class MainActivity extends Activity {
         cancelRequested = true;
         try {
             if (camera.isCaptureOpen()) camera.stopCapture();
+        } catch (Exception ignored) {}
+        try {
+            if (camera.isConnected() && camera.isLiveViewActive()) camera.stopLiveView();
         } catch (Exception ignored) {}
         try { unregisterReceiver(usbReceiver); } catch (Exception ignored) {}
         camera.disconnect();
