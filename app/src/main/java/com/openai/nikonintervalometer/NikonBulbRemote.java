@@ -41,6 +41,7 @@ public final class NikonBulbRemote {
     private static final long EXPOSURE_TIME_BULB = 0xFFFFFFFFL;
 
     private static final int RC_OK = 0x2001;
+    private static final int RC_ACCESS_DENIED = 0x200F;
     private static final int RC_DEVICE_BUSY = 0x2019;
     private static final int RC_SESSION_ALREADY_OPEN = 0x201E;
     private static final int RC_NIKON_BULB_RELEASE_BUSY = 0xA200;
@@ -188,6 +189,63 @@ public final class NikonBulbRemote {
         }
 
         waitUntilReady(15000);
+    }
+
+    public void rearmLiveView() throws Exception {
+        ensureConnected();
+        if (captureOpen) throw new Exception("Cannot re-arm Live View during an exposure");
+
+        // Nikon entry-level DSLRs can report Live View as active after a capture
+        // even though the internal capture state is no longer ready for another
+        // 0x9207 command. Force an EndLiveView/StartLiveView cycle instead of
+        // trusting the status property alone.
+        Response end = transact(
+                OC_NIKON_END_LIVE_VIEW,
+                new int[]{},
+                10000);
+
+        // AccessDenied here commonly means the capture already knocked Live View
+        // out internally. In that case we still continue with StartLiveView.
+        if (end.code != RC_OK && end.code != RC_ACCESS_DENIED) {
+            throw ptpException("Re-arm Live View (end)", end.code);
+        }
+
+        waitUntilReady(15000);
+
+        try {
+            Thread.sleep(300);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new Exception("Interrupted while re-arming Live View");
+        }
+
+        long deadline = System.currentTimeMillis() + 10000;
+        Response start;
+
+        do {
+            start = transact(
+                    OC_NIKON_START_LIVE_VIEW,
+                    new int[]{},
+                    5000);
+
+            if (start.code == RC_OK) {
+                waitUntilReady(15000);
+                return;
+            }
+
+            if (start.code != RC_ACCESS_DENIED && !isBusy(start.code)) {
+                throw ptpException("Re-arm Live View (start)", start.code);
+            }
+
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new Exception("Interrupted while re-arming Live View");
+            }
+        } while (System.currentTimeMillis() < deadline);
+
+        throw ptpException("Re-arm Live View (start)", start.code);
     }
 
     public int[] getImageHandles() throws Exception {
@@ -514,7 +572,8 @@ public final class NikonBulbRemote {
 
     private Exception ptpException(String operation, int code) {
         String hint = "";
-        if (code == RC_DEVICE_BUSY) hint = " — camera busy";
+        if (code == RC_ACCESS_DENIED) hint = " — access denied / camera state not ready";
+        else if (code == RC_DEVICE_BUSY) hint = " — camera busy";
         else if (code == RC_NIKON_BULB_RELEASE_BUSY) hint = " — Nikon Bulb release busy";
         else if (code == RC_NIKON_SILENT_RELEASE_BUSY) hint = " — Nikon silent release busy";
         else if (code == 0x2005) hint = " — operation not supported";
