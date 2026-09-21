@@ -28,6 +28,8 @@ public final class NikonBulbRemote {
     private static final int OC_GET_THUMB = 0x100A;
 
     private static final int OC_NIKON_DEVICE_READY = 0x90C8;
+    private static final int OC_NIKON_START_LIVE_VIEW = 0x9201;
+    private static final int OC_NIKON_END_LIVE_VIEW = 0x9202;
     private static final int OC_NIKON_INITIATE_CAPTURE_REC_IN_MEDIA = 0x9207;
     private static final int OC_NIKON_TERMINATE_CAPTURE = 0x920C;
 
@@ -36,6 +38,7 @@ public final class NikonBulbRemote {
     private static final int PROP_EXPOSURE_TIME = 0x500D;
     private static final int PROP_EXPOSURE_PROGRAM = 0x500E;
     private static final int PROP_EXPOSURE_DELAY_MODE = 0xD06A;
+    private static final int PROP_LIVE_VIEW_STATUS = 0xD1A2;
 
     private static final int EXPOSURE_PROGRAM_MANUAL = 0x0001;
     private static final int FOCUS_MODE_MANUAL = 0x0001;
@@ -218,6 +221,93 @@ public final class NikonBulbRemote {
         } catch (Exception ignored) {
             // Best effort only. Never turn a completed interval sequence into an error
             // just because the original menu setting could not be restored.
+        }
+    }
+
+
+    public boolean isLiveViewAvailable() {
+        if (!isConnected()) return false;
+        try {
+            getDevicePropertyDescriptor(PROP_LIVE_VIEW_STATUS);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public LiveViewSession prepareLiveViewMirrorFallback() {
+        if (!isConnected()) {
+            return LiveViewSession.unavailable("Camera not connected");
+        }
+
+        try {
+            boolean alreadyActive = getUint8Property(PROP_LIVE_VIEW_STATUS) != 0;
+            if (alreadyActive) {
+                return new LiveViewSession(
+                        true,
+                        false,
+                        "Live View mirror fallback active");
+            }
+
+            Response response = transact(
+                    OC_NIKON_START_LIVE_VIEW,
+                    new int[]{},
+                    10000);
+
+            if (response.code != RC_OK) {
+                return LiveViewSession.unavailable(
+                        String.format(Locale.US,
+                                "Live View start rejected: PTP 0x%04X",
+                                response.code));
+            }
+
+            waitUntilReady(15000);
+            return new LiveViewSession(
+                    true,
+                    true,
+                    "Live View mirror fallback active");
+        } catch (Exception e) {
+            return LiveViewSession.unavailable(
+                    "Live View mirror fallback unavailable: " + e.getMessage());
+        }
+    }
+
+    public boolean ensureLiveView(LiveViewSession session) {
+        if (session == null || !session.available || !isConnected()) return false;
+
+        try {
+            if (getUint8Property(PROP_LIVE_VIEW_STATUS) != 0) {
+                return false;
+            }
+
+            Response response = transact(
+                    OC_NIKON_START_LIVE_VIEW,
+                    new int[]{},
+                    10000);
+
+            if (response.code != RC_OK) return false;
+            waitUntilReady(15000);
+            session.startedByApp = true;
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public void endLiveViewFallback(LiveViewSession session) {
+        if (session == null || !session.available || !session.startedByApp || !isConnected()) return;
+
+        try {
+            if (getUint8Property(PROP_LIVE_VIEW_STATUS) == 0) return;
+            Response response = transact(
+                    OC_NIKON_END_LIVE_VIEW,
+                    new int[]{},
+                    10000);
+            if (response.code == RC_OK) {
+                waitUntilReady(15000);
+            }
+        } catch (Exception ignored) {
+            // Best effort cleanup only.
         }
     }
 
@@ -723,6 +813,23 @@ public final class NikonBulbRemote {
         return new Exception(String.format("%s: PTP 0x%04X%s", operation, code, hint));
     }
 
+
+
+    public static final class LiveViewSession {
+        public final boolean available;
+        public boolean startedByApp;
+        public final String message;
+
+        LiveViewSession(boolean available, boolean startedByApp, String message) {
+            this.available = available;
+            this.startedByApp = startedByApp;
+            this.message = message;
+        }
+
+        static LiveViewSession unavailable(String message) {
+            return new LiveViewSession(false, false, message);
+        }
+    }
 
     public static final class ExposureDelayInfo {
         public final boolean supported;
