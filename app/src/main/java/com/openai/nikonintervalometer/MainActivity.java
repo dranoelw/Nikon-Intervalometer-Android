@@ -15,6 +15,7 @@ import android.hardware.usb.UsbManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.text.InputType;
 import android.text.Editable;
 import android.text.TextWatcher;
@@ -63,6 +64,7 @@ public final class MainActivity extends Activity {
     private TextView cameraModeCheck;
     private TextView shutterCheck;
     private TextView focusCheck;
+    private TextView mirrorDelayCheck;
     private TextView batteryCheck;
     private TextView totalTimeView;
     private TextView timeLeftView;
@@ -300,6 +302,9 @@ public final class MainActivity extends Activity {
         focusCheck = checklistItem("Autofocus: MF");
         checklist.addView(focusCheck, topMargin(8));
 
+        mirrorDelayCheck = checklistItem("Mirror delay: checking…");
+        checklist.addView(mirrorDelayCheck, topMargin(8));
+
         batteryCheck = checklistItem("Camera Battery: --%");
         checklist.addView(batteryCheck, topMargin(8));
 
@@ -374,7 +379,8 @@ public final class MainActivity extends Activity {
         io.execute(() -> {
             try {
                 NikonBulbRemote.CameraSetup setup = camera.readCameraSetup();
-                main.post(() -> applyChecklist(setup));
+                NikonBulbRemote.ExposureDelayInfo delayInfo = camera.readExposureDelayInfo();
+                main.post(() -> applyChecklist(setup, delayInfo));
             } catch (Exception ignored) {
                 // A transient busy state should not turn a previously valid checklist into an error.
             } finally {
@@ -383,7 +389,9 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void applyChecklist(NikonBulbRemote.CameraSetup setup) {
+    private void applyChecklist(
+            NikonBulbRemote.CameraSetup setup,
+            NikonBulbRemote.ExposureDelayInfo delayInfo) {
         manualModeReady = setup.manualMode;
         bulbReady = setup.bulb;
         focusReady = setup.manualFocus;
@@ -391,6 +399,18 @@ public final class MainActivity extends Activity {
         setCheck(cameraModeCheck, "Camera Mode: Manual", manualModeReady);
         setCheck(shutterCheck, "Shutter Speed: Bulb", bulbReady);
         setCheck(focusCheck, "Autofocus: MF", focusReady);
+
+        if (delayInfo.canAutoConfigureTwoSeconds()) {
+            mirrorDelayCheck.setText("✓  Mirror delay: automatic 2 s");
+            mirrorDelayCheck.setTextColor(RED);
+        } else if (delayInfo.supported) {
+            mirrorDelayCheck.setText("•  Mirror delay: set 2 s in camera menu");
+            mirrorDelayCheck.setTextColor(GREY);
+        } else {
+            mirrorDelayCheck.setText("—  Mirror delay: USB control unavailable");
+            mirrorDelayCheck.setTextColor(GREY);
+        }
+
         batteryCheck.setText("Camera Battery: " + setup.batteryLevel + "%");
         batteryCheck.setTextColor(RED);
 
@@ -408,6 +428,10 @@ public final class MainActivity extends Activity {
         setCheck(cameraModeCheck, "Camera Mode: Manual", false);
         setCheck(shutterCheck, "Shutter Speed: Bulb", false);
         setCheck(focusCheck, "Autofocus: MF", false);
+        if (mirrorDelayCheck != null) {
+            mirrorDelayCheck.setText("—  Mirror delay: unknown");
+            mirrorDelayCheck.setTextColor(GREY);
+        }
         if (batteryCheck != null) {
             batteryCheck.setText("Camera Battery: --%");
             batteryCheck.setTextColor(RED);
@@ -630,12 +654,37 @@ public final class MainActivity extends Activity {
     }
 
     private void runSequence(double exposureSeconds, double pauseSeconds, int shots) {
+        NikonBulbRemote.ExposureDelaySession delaySession =
+                camera.prepareTwoSecondExposureDelay();
+
         try {
+            String delayMessage = delaySession.message;
+            main.post(() -> setStatus(delayMessage));
+
             for (int shot = 1; shot <= shots && !cancelRequested; shot++) {
                 int shotNo = shot;
 
-                main.post(() -> setStatus("Waiting for camera…"));
+                main.post(() -> setStatus(
+                        delaySession.configured
+                                ? "Mirror up / waiting for 2 s delay…"
+                                : "Waiting for camera…"));
+
+                long startCommandAt = SystemClock.elapsedRealtime();
                 camera.startCaptureNoAf();
+                long startCommandMs = SystemClock.elapsedRealtime() - startCommandAt;
+
+                if (delaySession.configured) {
+                    long remainingMirrorDelayMs = Math.max(0, 2000 - startCommandMs);
+                    if (!waitCancelable(remainingMirrorDelayMs)) {
+                        try { camera.stopCapture(); } catch (Exception ignored) {}
+                        break;
+                    }
+                }
+
+                if (cancelRequested) {
+                    try { camera.stopCapture(); } catch (Exception ignored) {}
+                    break;
+                }
 
                 main.post(() -> setStatus("Capturing"));
                 boolean fullExposure = exposureCountdown(
@@ -673,6 +722,7 @@ public final class MainActivity extends Activity {
                 setStatus("Camera error: " + e.getMessage());
             });
         } finally {
+            camera.restoreExposureDelay(delaySession);
             running = false;
             cancelRequested = false;
             main.post(() -> {
@@ -680,6 +730,24 @@ public final class MainActivity extends Activity {
                 refreshCameraChecklist();
             });
         }
+    }
+
+    private boolean waitCancelable(long millis) {
+        long end = SystemClock.elapsedRealtime() + Math.max(0, millis);
+
+        while (!cancelRequested) {
+            long remaining = end - SystemClock.elapsedRealtime();
+            if (remaining <= 0) return true;
+
+            try {
+                Thread.sleep(Math.min(100, remaining));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+
+        return false;
     }
 
     private boolean exposureCountdown(int shot, int total, double exposureSeconds, double pauseSeconds) {
