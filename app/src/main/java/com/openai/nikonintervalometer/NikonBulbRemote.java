@@ -24,6 +24,7 @@ public final class NikonBulbRemote {
     private static final int OC_GET_OBJECT_HANDLES = 0x1007;
     private static final int OC_GET_THUMB = 0x100A;
 
+    private static final int OC_NIKON_GET_EVENT = 0x90C7;
     private static final int OC_NIKON_DEVICE_READY = 0x90C8;
     private static final int OC_NIKON_START_LIVE_VIEW = 0x9201;
     private static final int OC_NIKON_END_LIVE_VIEW = 0x9202;
@@ -191,61 +192,37 @@ public final class NikonBulbRemote {
         waitUntilReady(15000);
     }
 
-    public void rearmLiveView() throws Exception {
+    public void settleAfterCapture() throws Exception {
         ensureConnected();
-        if (captureOpen) throw new Exception("Cannot re-arm Live View during an exposure");
 
-        // Nikon entry-level DSLRs can report Live View as active after a capture
-        // even though the internal capture state is no longer ready for another
-        // 0x9207 command. Force an EndLiveView/StartLiveView cycle instead of
-        // trusting the status property alone.
-        Response end = transact(
-                OC_NIKON_END_LIVE_VIEW,
-                new int[]{},
-                10000);
+        // Nikon bodies can report DeviceReady before all post-capture vendor
+        // events have been consumed. Drain the Nikon event queue, then verify
+        // readiness again without changing Live View state.
+        waitUntilReady(30000);
 
-        // AccessDenied here commonly means the capture already knocked Live View
-        // out internally. In that case we still continue with StartLiveView.
-        if (end.code != RC_OK && end.code != RC_ACCESS_DENIED) {
-            throw ptpException("Re-arm Live View (end)", end.code);
-        }
-
-        waitUntilReady(15000);
-
-        try {
-            Thread.sleep(300);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new Exception("Interrupted while re-arming Live View");
-        }
-
-        long deadline = System.currentTimeMillis() + 10000;
-        Response start;
-
-        do {
-            start = transact(
-                    OC_NIKON_START_LIVE_VIEW,
-                    new int[]{},
-                    5000);
-
-            if (start.code == RC_OK) {
-                waitUntilReady(15000);
-                return;
+        for (int i = 0; i < 3; i++) {
+            try {
+                dataOperation(
+                        OC_NIKON_GET_EVENT,
+                        new int[]{},
+                        3000);
+            } catch (Exception ignored) {
+                // Some bodies return no event data or time out once the queue is
+                // empty. That is not fatal for the next capture.
+                break;
             }
 
-            if (start.code != RC_ACCESS_DENIED && !isBusy(start.code)) {
-                throw ptpException("Re-arm Live View (start)", start.code);
-            }
+            waitUntilReady(10000);
 
             try {
-                Thread.sleep(300);
+                Thread.sleep(100);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new Exception("Interrupted while re-arming Live View");
+                throw new Exception("Interrupted while settling camera");
             }
-        } while (System.currentTimeMillis() < deadline);
+        }
 
-        throw ptpException("Re-arm Live View (start)", start.code);
+        waitUntilReady(30000);
     }
 
     public int[] getImageHandles() throws Exception {
@@ -292,6 +269,11 @@ public final class NikonBulbRemote {
                 return;
             }
 
+            if (response.code == RC_ACCESS_DENIED) {
+                settleAfterCapture();
+                continue;
+            }
+
             if (!isBusy(response.code)) {
                 throw ptpException("START rejected", response.code);
             }
@@ -317,7 +299,7 @@ public final class NikonBulbRemote {
             throw ptpException("STOP rejected", response.code);
         }
 
-        waitUntilReady(30000);
+        settleAfterCapture();
     }
 
     public boolean isCaptureOpen() {
