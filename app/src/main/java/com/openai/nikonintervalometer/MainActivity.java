@@ -727,11 +727,6 @@ public final class MainActivity extends Activity {
                 completed = shot;
                 main.post(() -> setStatus("Exposure saved"));
 
-                if (keepLiveView && shot < shots) {
-                    main.post(() -> setStatus("Re-arming Live View…"));
-                    camera.rearmLiveView();
-                }
-
                 if (shot < shots && pauseSeconds > 0) {
                     if (!pauseCountdown(shotNo, shots, exposureSeconds, pauseSeconds)) break;
                 }
