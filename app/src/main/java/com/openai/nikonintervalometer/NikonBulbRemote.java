@@ -10,6 +10,7 @@ import android.hardware.usb.UsbManager;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
+import java.util.Locale;
 
 public final class NikonBulbRemote {
     private static final int NIKON_VENDOR_ID = 0x04B0;
@@ -20,7 +21,9 @@ public final class NikonBulbRemote {
 
     private static final int OC_OPEN_SESSION = 0x1002;
     private static final int OC_CLOSE_SESSION = 0x1003;
+    private static final int OC_GET_DEVICE_PROP_DESC = 0x1014;
     private static final int OC_GET_DEVICE_PROP_VALUE = 0x1015;
+    private static final int OC_SET_DEVICE_PROP_VALUE = 0x1016;
     private static final int OC_GET_OBJECT_HANDLES = 0x1007;
     private static final int OC_GET_THUMB = 0x100A;
 
@@ -32,6 +35,7 @@ public final class NikonBulbRemote {
     private static final int PROP_FOCUS_MODE = 0x500A;
     private static final int PROP_EXPOSURE_TIME = 0x500D;
     private static final int PROP_EXPOSURE_PROGRAM = 0x500E;
+    private static final int PROP_EXPOSURE_DELAY_MODE = 0xD06A;
 
     private static final int EXPOSURE_PROGRAM_MANUAL = 0x0001;
     private static final int FOCUS_MODE_MANUAL = 0x0001;
@@ -147,6 +151,74 @@ public final class NikonBulbRemote {
                 exposureTime == EXPOSURE_TIME_BULB,
                 focusMode == FOCUS_MODE_MANUAL,
                 batteryLevel);
+    }
+
+
+    public ExposureDelayInfo readExposureDelayInfo() {
+        if (!isConnected()) return ExposureDelayInfo.unsupported("Camera not connected");
+
+        try {
+            DevicePropertyDescriptor desc = getDevicePropertyDescriptor(PROP_EXPOSURE_DELAY_MODE);
+            Integer twoSecondRaw = chooseTwoSecondExposureDelayValue(desc);
+            return new ExposureDelayInfo(
+                    true,
+                    desc.writable,
+                    desc.currentValue,
+                    twoSecondRaw,
+                    twoSecondRaw != null
+                            ? "Automatic 2 s mirror delay available"
+                            : "Exposure delay available; set 2 s in the camera menu");
+        } catch (Exception e) {
+            return ExposureDelayInfo.unsupported("USB exposure-delay control unavailable");
+        }
+    }
+
+    public ExposureDelaySession prepareTwoSecondExposureDelay() {
+        if (!isConnected()) {
+            return ExposureDelaySession.notConfigured("Camera not connected");
+        }
+
+        try {
+            DevicePropertyDescriptor desc = getDevicePropertyDescriptor(PROP_EXPOSURE_DELAY_MODE);
+            if (!desc.writable) {
+                return ExposureDelaySession.notConfigured(
+                        "Exposure delay is read-only; use the camera menu");
+            }
+
+            Integer target = chooseTwoSecondExposureDelayValue(desc);
+            if (target == null) {
+                return ExposureDelaySession.notConfigured(
+                        "Set Exposure delay mode to 2 s in the camera menu");
+            }
+
+            long previous = desc.currentValue;
+            if (previous != target) {
+                setDevicePropertyValue(PROP_EXPOSURE_DELAY_MODE, desc.dataType, target);
+            }
+
+            return new ExposureDelaySession(
+                    true,
+                    previous != target,
+                    previous,
+                    desc.dataType,
+                    "2 s mirror delay");
+        } catch (Exception e) {
+            return ExposureDelaySession.notConfigured(
+                    "Automatic mirror delay unavailable: " + e.getMessage());
+        }
+    }
+
+    public void restoreExposureDelay(ExposureDelaySession session) {
+        if (session == null || !session.configured || !session.changed || !isConnected()) return;
+        try {
+            setDevicePropertyValue(
+                    PROP_EXPOSURE_DELAY_MODE,
+                    session.dataType,
+                    session.previousValue);
+        } catch (Exception ignored) {
+            // Best effort only. Never turn a completed interval sequence into an error
+            // just because the original menu setting could not be restored.
+        }
     }
 
     public int[] getImageHandles() throws Exception {
@@ -321,6 +393,176 @@ public final class NikonBulbRemote {
         throw new Exception(String.format("Property 0x%04X timed out", propertyCode));
     }
 
+
+    private DevicePropertyDescriptor getDevicePropertyDescriptor(int propertyCode) throws Exception {
+        ensureConnected();
+        waitUntilReady(10000);
+
+        byte[] data = dataOperation(
+                OC_GET_DEVICE_PROP_DESC,
+                new int[]{propertyCode},
+                10000);
+
+        if (data.length < 8) {
+            throw new Exception(String.format(
+                    Locale.US, "Property 0x%04X returned an invalid descriptor", propertyCode));
+        }
+
+        ByteBuffer b = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
+        int returnedCode = b.getShort() & 0xFFFF;
+        int dataType = b.getShort() & 0xFFFF;
+        boolean writable = (b.get() & 0xFF) != 0;
+
+        if (returnedCode != propertyCode) {
+            throw new Exception("Camera returned the wrong property descriptor");
+        }
+
+        long factoryDefault = readPtpInteger(b, dataType);
+        long currentValue = readPtpInteger(b, dataType);
+        if (!b.hasRemaining()) {
+            return new DevicePropertyDescriptor(
+                    dataType, writable, factoryDefault, currentValue,
+                    0, Long.MIN_VALUE, Long.MIN_VALUE, 0, new long[0]);
+        }
+
+        int formFlag = b.get() & 0xFF;
+        long min = Long.MIN_VALUE;
+        long max = Long.MIN_VALUE;
+        long step = 0;
+        long[] values = new long[0];
+
+        if (formFlag == 1) {
+            min = readPtpInteger(b, dataType);
+            max = readPtpInteger(b, dataType);
+            step = readPtpInteger(b, dataType);
+        } else if (formFlag == 2) {
+            if (b.remaining() < 2) throw new Exception("Invalid property enumeration");
+            int count = b.getShort() & 0xFFFF;
+            values = new long[count];
+            for (int i = 0; i < count; i++) {
+                values[i] = readPtpInteger(b, dataType);
+            }
+        }
+
+        return new DevicePropertyDescriptor(
+                dataType, writable, factoryDefault, currentValue,
+                formFlag, min, max, step, values);
+    }
+
+    private Integer chooseTwoSecondExposureDelayValue(DevicePropertyDescriptor desc) {
+        if (!desc.writable) return null;
+
+        String model = getDeviceName().toUpperCase(Locale.US);
+
+        // The D750 generation has Nikon SDK documentation using the reverse
+        // 0=3 s, 1=2 s, 2=1 s, 3=Off encoding. Keep that known exception
+        // separate from the more common Nikon PTP encoding.
+        if (model.contains("D750") && desc.supports(1)) {
+            return 1;
+        }
+
+        // Most Nikon DSLR PTP descriptors that expose selectable delay lengths
+        // include raw value 2 for the 2-second choice. We only use it when the
+        // camera itself advertises that exact value.
+        if (desc.supports(2)) {
+            return 2;
+        }
+
+        // On/off-only bodies do not expose a selectable 2-second value over PTP.
+        return null;
+    }
+
+    private long readPtpInteger(ByteBuffer b, int dataType) throws Exception {
+        switch (dataType) {
+            case 0x0001:
+                requireRemaining(b, 1);
+                return b.get();
+            case 0x0002:
+                requireRemaining(b, 1);
+                return b.get() & 0xFFL;
+            case 0x0003:
+                requireRemaining(b, 2);
+                return b.getShort();
+            case 0x0004:
+                requireRemaining(b, 2);
+                return b.getShort() & 0xFFFFL;
+            case 0x0005:
+                requireRemaining(b, 4);
+                return b.getInt();
+            case 0x0006:
+                requireRemaining(b, 4);
+                return b.getInt() & 0xFFFFFFFFL;
+            default:
+                throw new Exception(String.format(
+                        Locale.US, "Unsupported PTP property datatype 0x%04X", dataType));
+        }
+    }
+
+    private byte[] encodePtpInteger(int dataType, long value) throws Exception {
+        ByteBuffer b;
+        switch (dataType) {
+            case 0x0001:
+            case 0x0002:
+                return new byte[]{(byte)(value & 0xFF)};
+            case 0x0003:
+            case 0x0004:
+                b = ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN);
+                b.putShort((short)(value & 0xFFFF));
+                return b.array();
+            case 0x0005:
+            case 0x0006:
+                b = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN);
+                b.putInt((int)(value & 0xFFFFFFFFL));
+                return b.array();
+            default:
+                throw new Exception(String.format(
+                        Locale.US, "Unsupported PTP property datatype 0x%04X", dataType));
+        }
+    }
+
+    private void requireRemaining(ByteBuffer b, int bytes) throws Exception {
+        if (b.remaining() < bytes) throw new Exception("Truncated PTP property descriptor");
+    }
+
+    private void setDevicePropertyValue(int propertyCode, int dataType, long value) throws Exception {
+        ensureConnected();
+        waitUntilReady(10000);
+
+        int tid = transactionId++;
+        sendCommand(
+                OC_SET_DEVICE_PROP_VALUE,
+                tid,
+                new int[]{propertyCode},
+                5000);
+
+        byte[] payload = encodePtpInteger(dataType, value);
+        int length = 12 + payload.length;
+        ByteBuffer data = ByteBuffer.allocate(length).order(ByteOrder.LITTLE_ENDIAN);
+        data.putInt(length);
+        data.putShort((short) CONTAINER_DATA);
+        data.putShort((short) OC_SET_DEVICE_PROP_VALUE);
+        data.putInt(tid);
+        data.put(payload);
+
+        byte[] out = data.array();
+        int written = connection.bulkTransfer(bulkOut, out, out.length, 5000);
+        if (written != out.length) throw new Exception("USB property write failed");
+
+        long deadline = System.currentTimeMillis() + 10000;
+        while (System.currentTimeMillis() < deadline) {
+            UsbContainer response = readContainer(
+                    Math.max(1, deadline - System.currentTimeMillis()));
+            if (response.transactionId != tid || response.type != CONTAINER_RESPONSE) continue;
+            if (response.code != RC_OK) {
+                throw ptpException("Set exposure delay", response.code);
+            }
+            waitUntilReady(10000);
+            return;
+        }
+
+        throw new Exception("Set exposure delay timed out");
+    }
+
     private byte[] dataOperation(int operationCode, int[] params, int timeoutMs) throws Exception {
         int tid = transactionId++;
         sendCommand(operationCode, tid, params, timeoutMs);
@@ -479,6 +721,108 @@ public final class NikonBulbRemote {
         else if (code == 0x2005) hint = " — operation not supported";
         else if (code == 0x200A) hint = " — invalid parameter";
         return new Exception(String.format("%s: PTP 0x%04X%s", operation, code, hint));
+    }
+
+
+    public static final class ExposureDelayInfo {
+        public final boolean supported;
+        public final boolean writable;
+        public final long currentValue;
+        public final Integer twoSecondRawValue;
+        public final String message;
+
+        ExposureDelayInfo(
+                boolean supported,
+                boolean writable,
+                long currentValue,
+                Integer twoSecondRawValue,
+                String message) {
+            this.supported = supported;
+            this.writable = writable;
+            this.currentValue = currentValue;
+            this.twoSecondRawValue = twoSecondRawValue;
+            this.message = message;
+        }
+
+        static ExposureDelayInfo unsupported(String message) {
+            return new ExposureDelayInfo(false, false, -1, null, message);
+        }
+
+        public boolean canAutoConfigureTwoSeconds() {
+            return supported && writable && twoSecondRawValue != null;
+        }
+    }
+
+    public static final class ExposureDelaySession {
+        public final boolean configured;
+        public final boolean changed;
+        public final long previousValue;
+        public final int dataType;
+        public final String message;
+
+        ExposureDelaySession(
+                boolean configured,
+                boolean changed,
+                long previousValue,
+                int dataType,
+                String message) {
+            this.configured = configured;
+            this.changed = changed;
+            this.previousValue = previousValue;
+            this.dataType = dataType;
+            this.message = message;
+        }
+
+        static ExposureDelaySession notConfigured(String message) {
+            return new ExposureDelaySession(false, false, -1, 0, message);
+        }
+    }
+
+    private static final class DevicePropertyDescriptor {
+        final int dataType;
+        final boolean writable;
+        final long factoryDefault;
+        final long currentValue;
+        final int formFlag;
+        final long min;
+        final long max;
+        final long step;
+        final long[] values;
+
+        DevicePropertyDescriptor(
+                int dataType,
+                boolean writable,
+                long factoryDefault,
+                long currentValue,
+                int formFlag,
+                long min,
+                long max,
+                long step,
+                long[] values) {
+            this.dataType = dataType;
+            this.writable = writable;
+            this.factoryDefault = factoryDefault;
+            this.currentValue = currentValue;
+            this.formFlag = formFlag;
+            this.min = min;
+            this.max = max;
+            this.step = step;
+            this.values = values;
+        }
+
+        boolean supports(long value) {
+            if (formFlag == 1) {
+                if (min == Long.MIN_VALUE || max == Long.MIN_VALUE || step <= 0) return false;
+                return value >= min && value <= max && ((value - min) % step == 0);
+            }
+            if (formFlag == 2) {
+                for (long candidate : values) {
+                    if (candidate == value) return true;
+                }
+                return false;
+            }
+            return currentValue == value || factoryDefault == value;
+        }
     }
 
     public static final class CameraSetup {
