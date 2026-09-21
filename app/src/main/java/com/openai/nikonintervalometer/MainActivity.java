@@ -56,6 +56,7 @@ public final class MainActivity extends Activity {
     private volatile boolean manualModeReady = false;
     private volatile boolean bulbReady = false;
     private volatile boolean focusReady = false;
+    private volatile boolean automaticMirrorDelayReady = false;
     private boolean destroyed = false;
     private int completed = 0;
 
@@ -400,7 +401,9 @@ public final class MainActivity extends Activity {
         setCheck(shutterCheck, "Shutter Speed: Bulb", bulbReady);
         setCheck(focusCheck, "Autofocus: MF", focusReady);
 
-        if (delayInfo.canAutoConfigureTwoSeconds()) {
+        automaticMirrorDelayReady = delayInfo.canAutoConfigureTwoSeconds();
+
+        if (automaticMirrorDelayReady) {
             mirrorDelayCheck.setText("✓  Mirror delay: automatic 2 s");
             mirrorDelayCheck.setTextColor(RED);
         } else if (delayInfo.supported) {
@@ -415,6 +418,7 @@ public final class MainActivity extends Activity {
         batteryCheck.setTextColor(RED);
 
         cameraSetupReady = manualModeReady && bulbReady && focusReady;
+        updatePlannedTimes();
         updateReadinessStatus();
         updateButtons();
     }
@@ -424,6 +428,7 @@ public final class MainActivity extends Activity {
         manualModeReady = false;
         bulbReady = false;
         focusReady = false;
+        automaticMirrorDelayReady = false;
         if (cameraModeCheck == null) return;
         setCheck(cameraModeCheck, "Camera Mode: Manual", false);
         setCheck(shutterCheck, "Shutter Speed: Bulb", false);
@@ -646,7 +651,11 @@ public final class MainActivity extends Activity {
         countdown.setTextColor(RED);
         updateButtons();
 
-        long totalMs = plannedTotalMs(exposureSeconds, pauseSeconds, shots);
+        long totalMs = plannedTotalMs(
+                exposureSeconds,
+                pauseSeconds,
+                shots,
+                automaticMirrorDelayReady);
         totalTimeView.setText("Total time: " + formatDuration(totalMs));
         timeLeftView.setText("Time left: " + formatDuration(totalMs));
 
@@ -675,7 +684,12 @@ public final class MainActivity extends Activity {
 
                 if (delaySession.configured) {
                     long remainingMirrorDelayMs = Math.max(0, 2000 - startCommandMs);
-                    if (!waitCancelable(remainingMirrorDelayMs)) {
+                    if (!mirrorDelayCountdown(
+                            shotNo,
+                            shots,
+                            exposureSeconds,
+                            pauseSeconds,
+                            remainingMirrorDelayMs)) {
                         try { camera.stopCapture(); } catch (Exception ignored) {}
                         break;
                     }
@@ -688,7 +702,11 @@ public final class MainActivity extends Activity {
 
                 main.post(() -> setStatus("Capturing"));
                 boolean fullExposure = exposureCountdown(
-                        shotNo, shots, exposureSeconds, pauseSeconds);
+                        shotNo,
+                        shots,
+                        exposureSeconds,
+                        pauseSeconds,
+                        delaySession.configured);
 
                 main.post(() -> setStatus("Sending STOP"));
                 camera.stopCapture();
@@ -699,7 +717,12 @@ public final class MainActivity extends Activity {
                 main.post(() -> setStatus("Exposure saved"));
 
                 if (shot < shots && pauseSeconds > 0) {
-                    if (!pauseCountdown(shotNo, shots, exposureSeconds, pauseSeconds)) break;
+                    if (!pauseCountdown(
+                            shotNo,
+                            shots,
+                            exposureSeconds,
+                            pauseSeconds,
+                            delaySession.configured)) break;
                 }
             }
 
@@ -732,15 +755,40 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private boolean waitCancelable(long millis) {
-        long end = SystemClock.elapsedRealtime() + Math.max(0, millis);
+    private boolean mirrorDelayCountdown(
+            int shot,
+            int total,
+            double exposureSeconds,
+            double pauseSeconds,
+            long remainingMirrorDelayMs) {
+
+        long exposureMs = (long)(exposureSeconds * 1000.0);
+        long pauseMs = (long)(pauseSeconds * 1000.0);
+        long end = SystemClock.elapsedRealtime() + Math.max(0, remainingMirrorDelayMs);
 
         while (!cancelRequested) {
             long remaining = end - SystemClock.elapsedRealtime();
             if (remaining <= 0) return true;
 
+            long futureCurrentExposureMs = exposureMs;
+            long futureShotCyclesMs = (long)(total - shot) * (2000L + exposureMs);
+            long futurePauseMs = (long)Math.max(0, total - shot) * pauseMs;
+            long sequenceRemaining =
+                    remaining + futureCurrentExposureMs + futureShotCyclesMs + futurePauseMs;
+            double remainingSec = remaining / 1000.0;
+
+            main.post(() -> {
+                countdown.setText(String.format(
+                        Locale.US,
+                        "Mirror delay %d / %d — %.1f s",
+                        shot,
+                        total,
+                        remainingSec));
+                timeLeftView.setText("Time left: " + formatDuration(sequenceRemaining));
+            });
+
             try {
-                Thread.sleep(Math.min(100, remaining));
+                Thread.sleep(Math.min(100, Math.max(1, remaining)));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return false;
@@ -750,7 +798,12 @@ public final class MainActivity extends Activity {
         return false;
     }
 
-    private boolean exposureCountdown(int shot, int total, double exposureSeconds, double pauseSeconds) {
+    private boolean exposureCountdown(
+            int shot,
+            int total,
+            double exposureSeconds,
+            double pauseSeconds,
+            boolean includeMirrorDelay) {
         long exposureMs = (long)(exposureSeconds * 1000.0);
         long pauseMs = (long)(pauseSeconds * 1000.0);
         long end = System.currentTimeMillis() + exposureMs;
@@ -759,7 +812,8 @@ public final class MainActivity extends Activity {
             long remaining = end - System.currentTimeMillis();
             if (remaining <= 0) return true;
 
-            long futureMs = (long)(total - shot) * exposureMs
+            long mirrorDelayMs = includeMirrorDelay ? 2000L : 0L;
+            long futureMs = (long)(total - shot) * (exposureMs + mirrorDelayMs)
                     + (long)(total - shot) * pauseMs;
             long sequenceRemaining = remaining + futureMs;
             double remainingSec = remaining / 1000.0;
@@ -780,7 +834,12 @@ public final class MainActivity extends Activity {
         return false;
     }
 
-    private boolean pauseCountdown(int shot, int total, double exposureSeconds, double pauseSeconds) {
+    private boolean pauseCountdown(
+            int shot,
+            int total,
+            double exposureSeconds,
+            double pauseSeconds,
+            boolean includeMirrorDelay) {
         long exposureMs = (long)(exposureSeconds * 1000.0);
         long pauseMs = (long)(pauseSeconds * 1000.0);
         long end = System.currentTimeMillis() + pauseMs;
@@ -789,9 +848,12 @@ public final class MainActivity extends Activity {
             long remaining = end - System.currentTimeMillis();
             if (remaining <= 0) return true;
 
+            long mirrorDelayMs = includeMirrorDelay ? 2000L : 0L;
             long futureExposureMs = (long)(total - shot) * exposureMs;
+            long futureMirrorDelayMs = (long)(total - shot) * mirrorDelayMs;
             long futurePauseMs = (long)Math.max(0, total - shot - 1) * pauseMs;
-            long sequenceRemaining = remaining + futureExposureMs + futurePauseMs;
+            long sequenceRemaining =
+                    remaining + futureExposureMs + futureMirrorDelayMs + futurePauseMs;
             double remainingSec = remaining / 1000.0;
 
             main.post(() -> {
@@ -819,7 +881,11 @@ public final class MainActivity extends Activity {
             int shots = Math.max(1,
                     Integer.parseInt(countField.getText().toString().trim()));
 
-            long totalMs = plannedTotalMs(exposureSeconds, pauseSeconds, shots);
+            long totalMs = plannedTotalMs(
+                    exposureSeconds,
+                    pauseSeconds,
+                    shots,
+                    automaticMirrorDelayReady);
             totalTimeView.setText("Total time: " + formatDuration(totalMs));
             timeLeftView.setText("Time left: " + formatDuration(totalMs));
         } catch (Exception ignored) {
@@ -830,10 +896,16 @@ public final class MainActivity extends Activity {
         updateButtons();
     }
 
-    private long plannedTotalMs(double exposureSeconds, double pauseSeconds, int shots) {
+    private long plannedTotalMs(
+            double exposureSeconds,
+            double pauseSeconds,
+            int shots,
+            boolean includeMirrorDelay) {
         long exposureMs = (long)(exposureSeconds * 1000.0);
         long pauseMs = (long)(pauseSeconds * 1000.0);
-        return (long)shots * exposureMs + (long)Math.max(0, shots - 1) * pauseMs;
+        long mirrorDelayMs = includeMirrorDelay ? 2000L : 0L;
+        return (long)shots * (exposureMs + mirrorDelayMs)
+                + (long)Math.max(0, shots - 1) * pauseMs;
     }
 
     private String formatDuration(long millis) {
