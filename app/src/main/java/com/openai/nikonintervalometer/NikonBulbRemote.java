@@ -24,7 +24,10 @@ public final class NikonBulbRemote {
     private static final int OC_GET_OBJECT_HANDLES = 0x1007;
     private static final int OC_GET_THUMB = 0x100A;
 
+    private static final int OC_NIKON_GET_EVENT = 0x90C7;
     private static final int OC_NIKON_DEVICE_READY = 0x90C8;
+    private static final int OC_NIKON_START_LIVE_VIEW = 0x9201;
+    private static final int OC_NIKON_END_LIVE_VIEW = 0x9202;
     private static final int OC_NIKON_INITIATE_CAPTURE_REC_IN_MEDIA = 0x9207;
     private static final int OC_NIKON_TERMINATE_CAPTURE = 0x920C;
 
@@ -32,12 +35,14 @@ public final class NikonBulbRemote {
     private static final int PROP_FOCUS_MODE = 0x500A;
     private static final int PROP_EXPOSURE_TIME = 0x500D;
     private static final int PROP_EXPOSURE_PROGRAM = 0x500E;
+    private static final int PROP_LIVE_VIEW_STATUS = 0xD1A2;
 
     private static final int EXPOSURE_PROGRAM_MANUAL = 0x0001;
     private static final int FOCUS_MODE_MANUAL = 0x0001;
     private static final long EXPOSURE_TIME_BULB = 0xFFFFFFFFL;
 
     private static final int RC_OK = 0x2001;
+    private static final int RC_ACCESS_DENIED = 0x200F;
     private static final int RC_DEVICE_BUSY = 0x2019;
     private static final int RC_SESSION_ALREADY_OPEN = 0x201E;
     private static final int RC_NIKON_BULB_RELEASE_BUSY = 0xA200;
@@ -149,6 +154,77 @@ public final class NikonBulbRemote {
                 batteryLevel);
     }
 
+    public boolean isLiveViewActive() throws Exception {
+        ensureConnected();
+        return getUint8Property(PROP_LIVE_VIEW_STATUS) != 0;
+    }
+
+    public void startLiveView() throws Exception {
+        ensureConnected();
+        if (isLiveViewActive()) return;
+
+        waitUntilReady(15000);
+        Response response = transact(
+                OC_NIKON_START_LIVE_VIEW,
+                new int[]{},
+                10000);
+
+        if (response.code != RC_OK) {
+            throw ptpException("Start Live View", response.code);
+        }
+
+        waitUntilReady(15000);
+    }
+
+    public void stopLiveView() throws Exception {
+        ensureConnected();
+        if (!isLiveViewActive()) return;
+
+        Response response = transact(
+                OC_NIKON_END_LIVE_VIEW,
+                new int[]{},
+                10000);
+
+        if (response.code != RC_OK) {
+            throw ptpException("End Live View", response.code);
+        }
+
+        waitUntilReady(15000);
+    }
+
+    public void settleAfterCapture() throws Exception {
+        ensureConnected();
+
+        // Nikon bodies can report DeviceReady before all post-capture vendor
+        // events have been consumed. Drain the Nikon event queue, then verify
+        // readiness again without changing Live View state.
+        waitUntilReady(30000);
+
+        for (int i = 0; i < 3; i++) {
+            try {
+                dataOperation(
+                        OC_NIKON_GET_EVENT,
+                        new int[]{},
+                        3000);
+            } catch (Exception ignored) {
+                // Some bodies return no event data or time out once the queue is
+                // empty. That is not fatal for the next capture.
+                break;
+            }
+
+            waitUntilReady(10000);
+
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new Exception("Interrupted while settling camera");
+            }
+        }
+
+        waitUntilReady(30000);
+    }
+
     public int[] getImageHandles() throws Exception {
         ensureConnected();
         waitUntilReady(30000);
@@ -193,6 +269,11 @@ public final class NikonBulbRemote {
                 return;
             }
 
+            if (response.code == RC_ACCESS_DENIED) {
+                settleAfterCapture();
+                continue;
+            }
+
             if (!isBusy(response.code)) {
                 throw ptpException("START rejected", response.code);
             }
@@ -218,7 +299,7 @@ public final class NikonBulbRemote {
             throw ptpException("STOP rejected", response.code);
         }
 
-        waitUntilReady(30000);
+        settleAfterCapture();
     }
 
     public boolean isCaptureOpen() {
@@ -473,7 +554,8 @@ public final class NikonBulbRemote {
 
     private Exception ptpException(String operation, int code) {
         String hint = "";
-        if (code == RC_DEVICE_BUSY) hint = " — camera busy";
+        if (code == RC_ACCESS_DENIED) hint = " — access denied / camera state not ready";
+        else if (code == RC_DEVICE_BUSY) hint = " — camera busy";
         else if (code == RC_NIKON_BULB_RELEASE_BUSY) hint = " — Nikon Bulb release busy";
         else if (code == RC_NIKON_SILENT_RELEASE_BUSY) hint = " — Nikon silent release busy";
         else if (code == 0x2005) hint = " — operation not supported";

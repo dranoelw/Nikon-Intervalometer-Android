@@ -26,6 +26,7 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ImageView;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -55,6 +56,7 @@ public final class MainActivity extends Activity {
     private volatile boolean manualModeReady = false;
     private volatile boolean bulbReady = false;
     private volatile boolean focusReady = false;
+    private volatile boolean suppressLiveViewToggleCallback = false;
     private boolean destroyed = false;
     private int completed = 0;
 
@@ -69,6 +71,7 @@ public final class MainActivity extends Activity {
     private EditText exposureField;
     private EditText pauseField;
     private EditText countField;
+    private Switch liveViewToggle;
     private Button startButton;
     private Button stopButton;
     private Button playbackButton;
@@ -177,6 +180,17 @@ public final class MainActivity extends Activity {
         root.addView(label("Pause after each exposure (seconds)"), topMargin(14));
         pauseField = numberField("0", true);
         root.addView(pauseField, fullWrap());
+
+        liveViewToggle = new Switch(this);
+        liveViewToggle.setText("Live View");
+        liveViewToggle.setTextSize(18);
+        liveViewToggle.setTextColor(RED);
+        liveViewToggle.setEnabled(false);
+        liveViewToggle.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            if (suppressLiveViewToggleCallback || running) return;
+            setLiveViewFromToggle(isChecked);
+        });
+        root.addView(liveViewToggle, topMargin(16));
 
         totalTimeView = text("Total time: --:--:--", 16);
         totalTimeView.setGravity(Gravity.CENTER);
@@ -374,7 +388,20 @@ public final class MainActivity extends Activity {
         io.execute(() -> {
             try {
                 NikonBulbRemote.CameraSetup setup = camera.readCameraSetup();
-                main.post(() -> applyChecklist(setup));
+                boolean liveViewActive = false;
+                boolean liveViewReadable = false;
+                try {
+                    liveViewActive = camera.isLiveViewActive();
+                    liveViewReadable = true;
+                } catch (Exception ignored) {
+                    // Some bodies may not expose the Live View status property.
+                }
+                boolean finalLiveViewActive = liveViewActive;
+                boolean finalLiveViewReadable = liveViewReadable;
+                main.post(() -> {
+                    applyChecklist(setup);
+                    syncLiveViewToggle(finalLiveViewActive, finalLiveViewReadable);
+                });
             } catch (Exception ignored) {
                 // A transient busy state should not turn a previously valid checklist into an error.
             } finally {
@@ -412,6 +439,7 @@ public final class MainActivity extends Activity {
             batteryCheck.setText("Camera Battery: --%");
             batteryCheck.setTextColor(RED);
         }
+        syncLiveViewToggle(false, false);
         updateReadinessStatus();
         updateButtons();
     }
@@ -419,6 +447,45 @@ public final class MainActivity extends Activity {
     private void setCheck(TextView view, String label, boolean good) {
         view.setText((good ? "✓  " : "✕  ") + label);
         view.setTextColor(good ? RED : GREY);
+    }
+
+    private void syncLiveViewToggle(boolean active, boolean readable) {
+        if (liveViewToggle == null) return;
+
+        suppressLiveViewToggleCallback = true;
+        liveViewToggle.setChecked(readable && active);
+        liveViewToggle.setEnabled(readable && !running);
+        suppressLiveViewToggleCallback = false;
+    }
+
+    private void setLiveViewFromToggle(boolean enabled) {
+        if (!camera.isConnected()) {
+            syncLiveViewToggle(false, false);
+            return;
+        }
+
+        liveViewToggle.setEnabled(false);
+        setStatus(enabled ? "Starting Live View…" : "Stopping Live View…");
+
+        io.execute(() -> {
+            try {
+                if (enabled) camera.startLiveView();
+                else camera.stopLiveView();
+
+                boolean active = camera.isLiveViewActive();
+                main.post(() -> {
+                    syncLiveViewToggle(active, true);
+                    setStatus(active ? "Live View on" : "Live View off");
+                    updateButtons();
+                });
+            } catch (Exception e) {
+                main.post(() -> {
+                    setStatus("Live View error: " + e.getMessage());
+                    refreshCameraChecklist();
+                    updateButtons();
+                });
+            }
+        });
     }
 
     private void openPlayback() {
@@ -626,15 +693,26 @@ public final class MainActivity extends Activity {
         totalTimeView.setText("Total time: " + formatDuration(totalMs));
         timeLeftView.setText("Time left: " + formatDuration(totalMs));
 
-        io.execute(() -> runSequence(exposureSeconds, pauseSeconds, shots));
+        final boolean keepLiveView = liveViewToggle != null && liveViewToggle.isChecked();
+        io.execute(() -> runSequence(exposureSeconds, pauseSeconds, shots, keepLiveView));
     }
 
-    private void runSequence(double exposureSeconds, double pauseSeconds, int shots) {
+    private void runSequence(
+            double exposureSeconds,
+            double pauseSeconds,
+            int shots,
+            boolean keepLiveView) {
         try {
             for (int shot = 1; shot <= shots && !cancelRequested; shot++) {
                 int shotNo = shot;
 
-                main.post(() -> setStatus("Waiting for camera…"));
+                if (keepLiveView && !camera.isLiveViewActive()) {
+                    main.post(() -> setStatus("Starting Live View…"));
+                    camera.startLiveView();
+                }
+
+                main.post(() -> setStatus(
+                        keepLiveView ? "Live View on — starting exposure" : "Waiting for camera…"));
                 camera.startCaptureNoAf();
 
                 main.post(() -> setStatus("Capturing"));
@@ -673,6 +751,11 @@ public final class MainActivity extends Activity {
                 setStatus("Camera error: " + e.getMessage());
             });
         } finally {
+            if (keepLiveView && camera.isConnected()) {
+                try {
+                    if (!camera.isLiveViewActive()) camera.startLiveView();
+                } catch (Exception ignored) {}
+            }
             running = false;
             cancelRequested = false;
             main.post(() -> {
@@ -878,6 +961,9 @@ public final class MainActivity extends Activity {
         exposureField.setEnabled(!running);
         pauseField.setEnabled(!running);
         countField.setEnabled(!running);
+        if (liveViewToggle != null) {
+            liveViewToggle.setEnabled(connected && !running);
+        }
         if (playbackButton != null) playbackButton.setEnabled(connected && !running);
         if (closePlaybackButton != null) closePlaybackButton.setEnabled(!running);
         if (previousButton != null) previousButton.setEnabled(connected && !running
@@ -953,6 +1039,9 @@ public final class MainActivity extends Activity {
         cancelRequested = true;
         try {
             if (camera.isCaptureOpen()) camera.stopCapture();
+        } catch (Exception ignored) {}
+        try {
+            if (camera.isConnected() && camera.isLiveViewActive()) camera.stopLiveView();
         } catch (Exception ignored) {}
         try { unregisterReceiver(usbReceiver); } catch (Exception ignored) {}
         camera.disconnect();
