@@ -27,6 +27,7 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ImageView;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -58,6 +59,7 @@ public final class MainActivity extends Activity {
     private volatile boolean focusReady = false;
     private volatile boolean automaticMirrorDelayReady = false;
     private volatile boolean liveViewMirrorFallbackReady = false;
+    private volatile boolean liveViewFallbackEnabled = false;
     private boolean destroyed = false;
     private int completed = 0;
 
@@ -67,6 +69,7 @@ public final class MainActivity extends Activity {
     private TextView shutterCheck;
     private TextView focusCheck;
     private TextView mirrorDelayCheck;
+    private Switch liveViewToggle;
     private TextView batteryCheck;
     private TextView totalTimeView;
     private TextView timeLeftView;
@@ -181,6 +184,17 @@ public final class MainActivity extends Activity {
         root.addView(label("Pause after each exposure (seconds)"), topMargin(14));
         pauseField = numberField("0", true);
         root.addView(pauseField, fullWrap());
+
+        liveViewToggle = new Switch(this);
+        liveViewToggle.setText("Use Live View mirror fallback");
+        liveViewToggle.setTextColor(RED);
+        liveViewToggle.setChecked(false);
+        liveViewToggle.setEnabled(false);
+        liveViewToggle.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            liveViewFallbackEnabled = isChecked;
+            if (!running) updatePlannedTimes();
+        });
+        root.addView(liveViewToggle, topMargin(14));
 
         totalTimeView = text("Total time: --:--:--", 16);
         totalTimeView.setGravity(Gravity.CENTER);
@@ -406,13 +420,23 @@ public final class MainActivity extends Activity {
 
         automaticMirrorDelayReady = delayInfo.canAutoConfigureTwoSeconds();
         liveViewMirrorFallbackReady = !automaticMirrorDelayReady && liveViewAvailable;
+        if (liveViewToggle != null) {
+            liveViewToggle.setEnabled(liveViewMirrorFallbackReady && !running);
+            if (!liveViewMirrorFallbackReady && liveViewToggle.isChecked()) {
+                liveViewToggle.setChecked(false);
+            }
+        }
 
         if (automaticMirrorDelayReady) {
             mirrorDelayCheck.setText("✓  Mirror delay: automatic 2 s");
             mirrorDelayCheck.setTextColor(RED);
         } else if (liveViewMirrorFallbackReady) {
-            mirrorDelayCheck.setText("✓  Mirror delay: Live View fallback");
-            mirrorDelayCheck.setTextColor(RED);
+            mirrorDelayCheck.setText(
+                    liveViewFallbackEnabled
+                            ? "✓  Mirror delay: Live View fallback enabled"
+                            : "•  Mirror delay: Live View fallback available");
+            mirrorDelayCheck.setTextColor(
+                    liveViewFallbackEnabled ? RED : GREY);
         } else if (delayInfo.supported) {
             mirrorDelayCheck.setText("•  Mirror delay: set 2 s in camera menu");
             mirrorDelayCheck.setTextColor(GREY);
@@ -437,6 +461,11 @@ public final class MainActivity extends Activity {
         focusReady = false;
         automaticMirrorDelayReady = false;
         liveViewMirrorFallbackReady = false;
+        liveViewFallbackEnabled = false;
+        if (liveViewToggle != null) {
+            liveViewToggle.setChecked(false);
+            liveViewToggle.setEnabled(false);
+        }
         if (cameraModeCheck == null) return;
         setCheck(cameraModeCheck, "Camera Mode: Manual", false);
         setCheck(shutterCheck, "Shutter Speed: Bulb", false);
@@ -664,7 +693,7 @@ public final class MainActivity extends Activity {
                 pauseSeconds,
                 shots,
                 automaticMirrorDelayReady,
-                liveViewMirrorFallbackReady);
+                liveViewMirrorFallbackReady && liveViewFallbackEnabled);
         totalTimeView.setText("Total time: " + formatDuration(totalMs));
         timeLeftView.setText("Time left: " + formatDuration(totalMs));
 
@@ -676,7 +705,9 @@ public final class MainActivity extends Activity {
                 camera.prepareTwoSecondExposureDelay();
         NikonBulbRemote.LiveViewSession liveViewSession = null;
 
-        if (!delaySession.configured) {
+        if (!delaySession.configured
+                && liveViewFallbackEnabled
+                && liveViewMirrorFallbackReady) {
             liveViewSession = camera.prepareLiveViewMirrorFallback();
         }
 
@@ -954,7 +985,7 @@ public final class MainActivity extends Activity {
                     pauseSeconds,
                     shots,
                     automaticMirrorDelayReady,
-                    liveViewMirrorFallbackReady);
+                    liveViewMirrorFallbackReady && liveViewFallbackEnabled);
             totalTimeView.setText("Total time: " + formatDuration(totalMs));
             timeLeftView.setText("Time left: " + formatDuration(totalMs));
         } catch (Exception ignored) {
@@ -1090,6 +1121,9 @@ public final class MainActivity extends Activity {
         exposureField.setEnabled(!running);
         pauseField.setEnabled(!running);
         countField.setEnabled(!running);
+        if (liveViewToggle != null) {
+            liveViewToggle.setEnabled(!running && liveViewMirrorFallbackReady);
+        }
         if (playbackButton != null) playbackButton.setEnabled(connected && !running);
         if (closePlaybackButton != null) closePlaybackButton.setEnabled(!running);
         if (previousButton != null) previousButton.setEnabled(connected && !running
